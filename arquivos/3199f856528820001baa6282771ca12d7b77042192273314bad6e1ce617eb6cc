@@ -1,0 +1,219 @@
+/**
+ * Registro de Ações: tabela persistente das falhas de ferramentas.
+ *
+ * Quando o ARES não consegue executar uma tarefa (tool ok:false), a falha é
+ * registrada aqui como uma linha da tabela: hora, tipo de ação, ferramenta e o
+ * erro real. A fala NÃO repete o erro técnico — fala apenas "no momento não
+ * posso realizar essa tarefa" (ver executor.ts) e o detalhe fica nesta tabela,
+ * exibida na janela REGISTRO DE AÇÕES do HUD ("exibir log de erros").
+ */
+import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
+import path from "path";
+import type { ToolName } from "./types";
+
+export interface ErroRegistro {
+  id: number;
+  /** HH:MM:SS */
+  hora: string;
+  /** ISO completo (para ordenar/agrupar por dia). */
+  iso: string;
+  /** Tipo da ação pedida (ex.: "apagar arquivo", "enviar whatsapp"). */
+  acao: string;
+  /** Nome da ferramenta que falhou. */
+  tool: ToolName;
+  /** Mensagem de erro real (técnica). */
+  erro: string;
+  /** Erro recebido de outra instalação via MQTT (telemetria do dev). */
+  remoto?: boolean;
+  /** Identificador da instalação que originou o erro remoto. */
+  de?: string;
+}
+
+const ERROS_DIR = path.join(os.homedir(), ".ares");
+const ERROS_FILE = path.join(ERROS_DIR, "erros.json");
+const MAX_ERROS = 300;
+
+let cache: ErroRegistro[] | null = null;
+let writeQueue: Promise<void> = Promise.resolve();
+let seq = 0; // contador monotônico: id único mesmo com falhas no mesmo ms
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function horaDe(iso: string): string {
+  return new Date(iso).toLocaleTimeString("pt-BR", { hour12: false });
+}
+
+function ensureLoaded(): ErroRegistro[] {
+  if (cache) return cache;
+  try {
+    if (fs.existsSync(ERROS_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(ERROS_FILE, "utf8")) as unknown;
+      cache = Array.isArray(raw)
+        ? (raw as ErroRegistro[]).filter((e) => e && typeof e.tool === "string").slice(0, MAX_ERROS)
+        : [];
+    } else {
+      cache = [];
+    }
+  } catch {
+    cache = [];
+  }
+  return cache;
+}
+
+function scheduleSave(): void {
+  const data = cache ?? [];
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(ERROS_DIR, { recursive: true });
+      await fsp.writeFile(ERROS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch {
+      /* tabela é best-effort: nunca derruba o fluxo */
+    }
+  });
+}
+
+/** Rótulo amigável do tipo de ação para a tabela. */
+export function acaoLabel(tool: ToolName): string {
+  const map: Partial<Record<ToolName, string>> = {
+    delete_path: "apagar arquivo",
+    rename_path: "renomear arquivo",
+    create_file: "criar arquivo",
+    create_folder: "criar pasta",
+    create_project: "criar projeto",
+    read_file: "ler arquivo",
+    edit_file: "editar arquivo",
+    list_folder: "listar pasta",
+    open_folder: "abrir pasta",
+    web_search: "pesquisar na internet",
+    fetch_url: "ler página",
+    open_url: "abrir site",
+    open_program: "abrir programa",
+    send_whatsapp: "enviar WhatsApp",
+    whatsapp_read: "ler WhatsApp",
+    open_instagram: "abrir Instagram",
+    social_search: "pesquisar rede social",
+    weather: "previsão do tempo",
+    currency: "converter moeda",
+    crypto: "cotação cripto",
+    country: "dados de país",
+    joke: "contar piada",
+    remember: "guardar na memória",
+    forget: "esquecer da memória",
+    add_task: "anotar tarefa",
+    remove_task: "remover tarefa",
+    list_tasks: "listar tarefas",
+    add_agenda: "marcar agenda",
+    remove_agenda: "remover da agenda",
+    list_agenda: "consultar agenda",
+    convert_units: "converter medida",
+    take_screenshot: "tirar print",
+    screen_read: "ler a tela",
+    screen_click: "clicar na tela",
+    type_text: "digitar texto",
+    screen_ask: "descrever a tela",
+    window_control: "controlar janela",
+    list_windows: "listar janelas",
+    show_image: "mostrar imagem",
+  };
+  return map[tool] ?? tool;
+}
+
+function inserir(entry: ErroRegistro): void {
+  const data = ensureLoaded();
+  data.unshift(entry);
+  if (data.length > MAX_ERROS) data.length = MAX_ERROS;
+  scheduleSave();
+}
+
+/**
+ * Registra uma falha de ferramenta na tabela. Recebe o erro real e o tipo de
+ * ação. Não lança — o registro nunca quebra o fluxo principal.
+ * Também envia uma cópia enxuta ao broker (telemetria: o dev recebe na área
+ * de erros dele via MQTT).
+ */
+export function registrarFalha(tool: ToolName, erro: string, acao?: string): void {
+  const iso = nowIso();
+  const entry: ErroRegistro = {
+    id: Date.now() * 100 + (seq++ % 100),
+    hora: horaDe(iso),
+    iso,
+    acao: acao ?? acaoLabel(tool),
+    tool,
+    erro: String(erro ?? "").slice(0, 400) || "erro desconhecido",
+  };
+  inserir(entry);
+  try {
+    // Telemetria: publicação é assíncrona/best-effort — nunca quebra o fluxo.
+    void import("./errosMqtt").then((m) => m.publicarFalha(entry));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Injeta um erro remoto (de outra instalação) na tabela local. */
+export function registrarErroRemoto(e: {
+  remoto: true;
+  de: string;
+  id: number;
+  hora: string;
+  iso: string;
+  acao: string;
+  tool: string;
+  erro: string;
+}): void {
+  inserir({
+    ...e,
+    tool: e.tool as ToolName,
+  });
+}
+
+/** Liga a telemetria: erros remotos chegam aqui e entram na tabela. */
+export function ativarTelemetriaErros(): void {
+  try {
+    void import("./errosMqtt").then((m) => {
+      m.registrarReceptorErros(registrarErroRemoto);
+      m.iniciarReceptorErros();
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Devolve a tabela de erros (mais recentes primeiro). */
+export function listarErros(limite = 100): ErroRegistro[] {
+  return ensureLoaded().slice(0, limite);
+}
+
+/** Limpa a tabela inteira. */
+export function limparErros(): { ok: boolean; message: string } {
+  cache = [];
+  scheduleSave();
+  return { ok: true, message: "Registro de ações limpo." };
+}
+
+/**
+ * True quando a mensagem parece um erro TÉCNICO (exceção, caminho, código).
+ * Caminhos usam \x5c (hex) em vez de \\ para não sofrerem duplo-escape.
+ */
+export function isTechnicalError(msg: string): boolean {
+  const s = (msg ?? "").toLowerCase();
+  if (!s) return true;
+  const pathRe =
+    /(?:[a-z]:\x5c[\w\x5c.\s-]+|[a-z]:\/[\w\/.\s-]+|\x5c\x5c[\w\x5c.\s-]+)/i;
+  return (
+    /\b(?:error|exception|timeout|timedout|etimedout|eacces|enoent|eexist|econnrefused|undefined|null|nan|typeerror|syntaxerror|referenceerror|rangeerror|aggregateerror|networkerror|rejected)\b/.test(
+      s,
+    ) ||
+    pathRe.test(s) ||
+    /(?:at\s+[\w.]+\x5c?\.|node_modules|\.tsx?:|\.jsx?:|stack\s+trace|is\s+not\s+a\s+function|of\s+undefined|is\s+not\s+defined)/i.test(s)
+  );
+}
+
+/** Versão enxuta para testes: limpa o cache em memória sem tocar no disco. */
+export function __resetErrosCache(): void {
+  cache = null;
+}
