@@ -1,9 +1,9 @@
 {
-  "versao": "20260810-141605",
+  "versao": "20260810-141951",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Modo desenvolvedor oculto no menu CONFIGURAÇÕES para usuários (só aparece na máquina do dev)"
+    "Voz mais limpa: artefatos do modelo (speak, xml, lang, pt-BR-FranciscaNeural, pontos e traços residuais) não são mais lidos em voz alta"
   ],
   "arquivos": [
     {
@@ -343,8 +343,8 @@
     },
     {
       "caminho": "lib/voice.ts",
-      "url": "arquivos/4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f",
-      "sha256": "4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f"
+      "url": "arquivos/358b4942b8b861b7532c76e8cc2a0eef43341a44e154525d3c9212190e99a068",
+      "sha256": "358b4942b8b861b7532c76e8cc2a0eef43341a44e154525d3c9212190e99a068"
     },
     {
       "caminho": "lib/wellness.ts",
