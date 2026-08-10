@@ -1,12 +1,10 @@
 {
-  "versao": "20260809-235439",
+  "versao": "20260809-235644",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Loading mais leve e bonito",
-    "Launcher novo (arthemis.bat)",
-    "Atualizacoes cumulativas (nao quebram mais)",
-    "Notas de versao exibidas apos instalar"
+    "Teste de notas via UI",
+    "Segunda linha"
   ],
   "arquivos": [
     {
