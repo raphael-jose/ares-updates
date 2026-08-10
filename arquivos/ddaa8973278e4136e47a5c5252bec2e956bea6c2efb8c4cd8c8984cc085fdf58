@@ -1,0 +1,27 @@
+import type { Metadata, Viewport } from "next";
+import "bootstrap-icons/font/bootstrap-icons.css";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Arthemis — Assistente por Voz",
+  description:
+    "Arthemis: orbe holográfico com reconhecimento de voz em português e IA local/nuvem que controla o seu PC.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#1a0f00",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="pt-BR">
+      <body>{children}</body>
+    </html>
+  );
+}
