@@ -1,9 +1,10 @@
 {
-  "versao": "20260810-151350",
+  "versao": "20260810-151435",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "teste"
+    "Chat: envio resiliente — mensagens sobrevivem a quedas curtas (reconexão automática) e o texto digitado nunca se perde em caso de falha",
+    "Chat: status honesto — contato só aparece online quando o canal está realmente aberto; avisos claros quando a conexão cai"
   ],
   "arquivos": [
     {
