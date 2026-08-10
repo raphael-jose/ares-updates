@@ -1,0 +1,61 @@
+/**
+ * Checagem de raiz no boot.
+ *
+ * O Turbopack sobe a árvore de pastas procurando o `package-lock.json` mais
+ * próximo para decidir a raiz do projeto. Se existir um `package-lock.json`
+ * (ou `node_modules`) ÓRFÃO num diretório PAI — ex.: a pasta do projeto dentro
+ * de outra pasta que também tem lock, ou uma cópia aninhada — o Turbopack pode
+ * escolher a raiz ERRADA e o app derruba em 404.
+ *
+ * Esta checagem roda no boot do servidor, sobe a árvore e, se achar o órfão,
+ * guarda o aviso — exposto via /api/raiz e mostrado como banner na interface
+ * para o usuário saber que precisa mover o projeto ou remover o lock do pai.
+ */
+
+import fs from "fs";
+import path from "path";
+
+export interface AvisoRaiz {
+  encontrou: boolean;
+  raizProjeto: string;
+  suspeitos: Array<{
+    caminho: string;
+    temLock: boolean;
+    temNodeModules: boolean;
+  }>;
+}
+
+let cache: AvisoRaiz | null = null;
+
+/** Sobe a árvore a partir da raiz do projeto procurando locks/node_modules órfãos. */
+export function checarRaiz(): AvisoRaiz {
+  if (cache) return cache;
+  const raizProjeto = path.resolve(process.cwd());
+  const suspeitos: AvisoRaiz["suspeitos"] = [];
+
+  // Sobe até 4 níveis acima do projeto (o suficiente para pegar o caso comum
+  // "projeto dentro de uma pasta com lock" sem varrer o disco inteiro).
+  let dir = path.dirname(raizProjeto);
+  for (let i = 0; i < 4 && dir !== path.dirname(dir); i++) {
+    const temLock = fs.existsSync(path.join(dir, "package-lock.json"));
+    const temNodeModules = fs.existsSync(path.join(dir, "node_modules"));
+    // Só interessa se a pasta do PAI tiver lock/node_modules — é isso que
+    // confunde o Turbopack. O próprio projeto (com lock próprio) é o normal.
+    if (temLock || temNodeModules) {
+      suspeitos.push({ caminho: dir, temLock, temNodeModules });
+    }
+    dir = path.dirname(dir);
+  }
+
+  cache = {
+    encontrou: suspeitos.length > 0,
+    raizProjeto,
+    suspeitos,
+  };
+  return cache;
+}
+
+/** Zera o cache (usado em testes). */
+export function __resetRaizCheck(): void {
+  cache = null;
+}
