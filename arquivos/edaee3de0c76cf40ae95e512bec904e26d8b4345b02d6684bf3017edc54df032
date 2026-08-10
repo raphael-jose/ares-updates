@@ -1,0 +1,320 @@
+/**
+ * Servidor do WhatsApp do ARES (sessão real via whatsapp-web.js).
+ *
+ * Roda como processo separado (spawnado sob demanda pelo Next ou via
+ * `npm run whatsapp`). Mantém uma sessão persistente (LocalAuth) e expõe:
+ *
+ *   GET  /status        → { ok, connected, qr?, ready? }
+ *   POST /send          → { to, message } → { ok, message }
+ *   GET  /chats         → lista de conversas (id, name, lastMessage, at)
+ *   GET  /messages?chat → { chat, messages: [...] }
+ *   GET  /events?since  → mensagens recebidas novas desde o timestamp
+ *
+ * O QR code é devolvido como data URL para o HUD renderizar direto.
+ */
+import { createServer } from "http";
+import { existsSync, mkdirSync } from "fs";
+import path from "path";
+import os from "os";
+
+const PORT = Number(process.env.WHATSAPP_PORT ?? 38741);
+const SESSION_DIR = path.join(process.cwd(), ".whatsapp-session");
+
+const qrToDataUrl = async (qr: string): Promise<string | null> => {
+  try {
+    const mod = await import("qrcode");
+    return await mod.toDataURL(qr, { margin: 1, width: 320 });
+  } catch {
+    return null;
+  }
+};
+
+/** Detecta o Chrome do sistema (puppeteer foi instalado sem baixar Chromium). */
+function findChrome(): string | undefined {
+  const candidates = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    `${os.homedir()}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  return candidates.find((c) => existsSync(c));
+}
+
+type ChatInfo = {
+  id: string;
+  name: string;
+  lastMessage: string;
+  at: number;
+};
+
+interface IncomingEvent {
+  id: string;
+  from: string;
+  name: string;
+  body: string;
+  at: number;
+}
+
+let client: any = null;
+let state: {
+  connected: boolean;
+  ready: boolean;
+  qr: string | null;
+  qrAt: number;
+  lastError: string | null;
+} = { connected: false, ready: false, qr: null, qrAt: 0, lastError: null };
+
+const events: IncomingEvent[] = [];
+const MAX_EVENTS = 200;
+
+function pushEvent(ev: IncomingEvent) {
+  events.push(ev);
+  if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+}
+
+async function startClient() {
+  // ESM interop: o import() dinâmico pode embrulhar o CJS em { default }.
+  const waModule = await import("whatsapp-web.js");
+  const Client = (waModule as any).Client ?? (waModule as any).default?.Client;
+  const LocalAuth = (waModule as any).LocalAuth ?? (waModule as any).default?.LocalAuth;
+  if (!Client || !LocalAuth) {
+    state.lastError = "whatsapp-web.js não carregou corretamente.";
+    console.error("[whatsapp] módulo inválido:", Object.keys(waModule));
+    return;
+  }
+  const chrome = findChrome();
+  const headless = (process.env.WHATSAPP_HEADLESS ?? "1") !== "0";
+
+  if (!existsSync(SESSION_DIR)) mkdirSync(SESSION_DIR, { recursive: true });
+
+  const clientOpts: any = {
+    authStrategy: new LocalAuth({ dataPath: SESSION_DIR }),
+    puppeteer: {
+      headless,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--disable-extensions",
+      ],
+      ...(chrome ? { executablePath: chrome } : {}),
+    },
+    qrMaxRetries: 3,
+  };
+
+  client = new Client(clientOpts);
+
+  client.on("qr", async (qr: string) => {
+    state.qr = (await qrToDataUrl(qr)) ?? `data:text/plain;base64,${Buffer.from(qr).toString("base64")}`;
+    state.qrAt = Date.now();
+    state.connected = false;
+    state.ready = false;
+  });
+
+  client.on("authenticated", () => {
+    state.qr = null;
+  });
+
+  client.on("ready", () => {
+    state.connected = true;
+    state.ready = true;
+    state.qr = null;
+    state.lastError = null;
+    console.log("[whatsapp] pronto, sessão conectada");
+  });
+
+  client.on("message", async (msg: any) => {
+    if (msg.fromMe) return;
+    try {
+      const chat = await msg.getChat();
+      const contact = await msg.getContact();
+      const name = (contact?.pushname || contact?.name || chat?.name || "Contato").trim();
+      pushEvent({
+        id: msg.id?.id ?? `${Date.now()}`,
+        from: String(msg.from ?? ""),
+        name,
+        body: String(msg.body ?? "").slice(0, 500),
+        at: Date.now(),
+      });
+    } catch {
+      pushEvent({
+        id: msg.id?.id ?? `${Date.now()}`,
+        from: String(msg.from ?? ""),
+        name: "Contato",
+        body: String(msg.body ?? "").slice(0, 500),
+        at: Date.now(),
+      });
+    }
+  });
+
+  client.on("disconnected", (reason: string) => {
+    state.connected = false;
+    state.ready = false;
+    state.lastError = `Desconectado: ${reason}`;
+    console.log("[whatsapp] desconectado:", reason);
+    // Destrói o client anterior (evita vazar puppeteer a cada reconexão)
+    const old = client;
+    client = null;
+    if (old?.destroy) void old.destroy().catch(() => {});
+    // Tenta religar em 8s (a sessão salva permite reconexão sem QR)
+    setTimeout(() => {
+      if (!state.connected) void startClient().catch(() => {});
+    }, 8000);
+  });
+
+  client.on("auth_failure", (m: string) => {
+    state.lastError = `Falha de autenticação: ${m}`;
+    console.log("[whatsapp] auth_failure:", m);
+  });
+
+  try {
+    await client.initialize();
+  } catch (err) {
+    state.lastError = err instanceof Error ? err.message : String(err);
+    console.error("[whatsapp] erro ao iniciar:", state.lastError);
+    const old = client;
+    client = null;
+    if (old?.destroy) void old.destroy().catch(() => {});
+    setTimeout(() => {
+      if (!state.connected) void startClient().catch(() => {});
+    }, 15000);
+  }
+}
+
+function readJsonBody(req: any): Promise<Record<string, string>> {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (c: Buffer) => {
+      data += c;
+      if (data.length > 1_000_000) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data || "{}"));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on("error", () => resolve({}));
+  });
+}
+
+function sendJson(res: any, code: number, obj: unknown) {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(obj));
+}
+
+async function handleRequest(req: any, res: any) {
+  const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  const pathname = url.pathname;
+
+  if (pathname === "/status") {
+    return sendJson(res, 200, {
+      ok: true,
+      connected: state.connected,
+      ready: state.ready,
+      qr: state.qr,
+      qrAt: state.qrAt,
+      lastError: state.lastError,
+      sessionExists: existsSync(path.join(SESSION_DIR, "session")),
+    });
+  }
+
+  if (pathname === "/send" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const to = (body.to ?? "").trim();
+    const message = (body.message ?? "").trim();
+    if (!to || !message) return sendJson(res, 400, { ok: false, message: "Informe to e message." });
+    if (!client || !state.connected) {
+      return sendJson(res, 409, {
+        ok: false,
+        message: "O WhatsApp ainda não está conectado. Abra a janela do WhatsApp no HUD e escaneie o QR code.",
+      });
+    }
+    try {
+      const chatId = to.includes("@") ? to : `${to.replace(/\D/g, "")}@c.us`;
+      await client.sendMessage(chatId, message);
+      return sendJson(res, 200, { ok: true, message: "Enviada." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return sendJson(res, 500, { ok: false, message: `Não consegui enviar: ${msg}` });
+    }
+  }
+
+  if (pathname === "/chats") {
+    if (!client || !state.connected) {
+      return sendJson(res, 409, { ok: false, message: "WhatsApp não conectado." });
+    }
+    try {
+      const chats = await client.getChats();
+      const out: ChatInfo[] = [];
+      for (const c of chats) {
+        const last = c.lastMessage;
+        out.push({
+          id: String(c.id?._serialized ?? c.id ?? ""),
+          name: String(c.name || "?"),
+          lastMessage: last ? String(last.body ?? "").slice(0, 80) : "",
+          at: (c.timestamp ?? 0) * 1000,
+        });
+      }
+      out.sort((a, b) => b.at - a.at);
+      return sendJson(res, 200, { ok: true, chats: out.slice(0, 60) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return sendJson(res, 500, { ok: false, message: msg });
+    }
+  }
+
+  if (pathname === "/messages") {
+    const chat = (url.searchParams.get("chat") ?? "").trim();
+    if (!chat) return sendJson(res, 400, { ok: false, message: "Informe chat." });
+    if (!client || !state.connected) {
+      return sendJson(res, 409, { ok: false, message: "WhatsApp não conectado." });
+    }
+    try {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 30), 5), 80);
+      const chatObj = await client.getChatById(chat);
+      const msgs = await chatObj.fetchMessages({ limit });
+      const list = msgs.map((m: any) => ({
+        id: String(m.id?.id ?? ""),
+        fromMe: Boolean(m.fromMe),
+        body: String(m.body ?? "").slice(0, 800),
+        at: (m.timestamp ?? 0) * 1000,
+      }));
+      return sendJson(res, 200, { ok: true, name: String(chatObj.name ?? "?"), messages: list.reverse() });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return sendJson(res, 500, { ok: false, message: msg });
+    }
+  }
+
+  if (pathname === "/events") {
+    const since = Number(url.searchParams.get("since") ?? 0);
+    const fresh = events.filter((e) => e.at > since);
+    return sendJson(res, 200, { ok: true, events: fresh.slice(-15) });
+  }
+
+  return sendJson(res, 404, { ok: false, message: "Rota não encontrada." });
+}
+
+const server = createServer((req, res) => {
+  void handleRequest(req, res).catch((err) => {
+    sendJson(res, 500, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  });
+});
+
+// Liga só em loopback: o servidor não tem auth e não deve ficar exposto na LAN.
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`[whatsapp] servidor na porta ${PORT} (127.0.0.1)`);
+  void startClient();
+});
+
+process.on("SIGTERM", () => {
+  if (client?.destroy) void client.destroy().catch(() => {});
+  server.close(() => process.exit(0));
+});
+process.on("SIGINT", () => process.exit(0));
