@@ -1,0 +1,246 @@
+/**
+ * Catálogo de comandos de voz do ARES — fonte da janela "mostrar comandos" do
+ * HUD. Mantém a lista organizada por categoria, com o comando falado e o que
+ * ele faz. Mantenha em sincronia com o COMANDOS.md.
+ */
+
+export interface Comando {
+  /** O que o usuário fala (ex.: "abre o editor"). */
+  fala: string;
+  /** O que acontece (descrição curta). */
+  faz: string;
+}
+
+export interface CategoriaComandos {
+  nome: string;
+  icone: string;
+  comandos: Comando[];
+}
+
+export const CATALOGO_COMANDOS: CategoriaComandos[] = [
+  {
+    nome: "Conversa",
+    icone: "bi-chat-dots",
+    comandos: [
+      { fala: "olá / e aí / bom dia", faz: "Saudação" },
+      { fala: "limpa a conversa", faz: "Apaga o histórico da conversa" },
+      { fala: "qual é o meu nome?", faz: "Diz o nome salvo na memória" },
+      { fala: "o que você sabe sobre mim?", faz: "Lista o que o ARES lembra" },
+    ],
+  },
+  {
+    nome: "Humor e personalidade",
+    icone: "bi-emoji-laughing",
+    comandos: [
+      { fala: "modo sério", faz: "Zera o sarcasmo do ARES (0%)" },
+      { fala: "modo brincalhão / máximo sarcasmo", faz: "Sarcasmo no máximo (100%)" },
+      { fala: "aumenta seu sarcasmo / diminui o humor", faz: "Sobe/desce 20 pontos" },
+      { fala: "deixa o seu humor em 70%", faz: "Define o nível exato (0–100%)" },
+      { fala: "qual é o seu nível de humor?", faz: "Fala o nível atual" },
+    ],
+  },
+  {
+    nome: "Arquivos e pastas",
+    icone: "bi-folder2-open",
+    comandos: [
+      { fala: "cria a pasta projetos", faz: "Cria pasta" },
+      { fala: "cria o arquivo notas.txt", faz: "Cria arquivo" },
+      { fala: "cria o projeto meuapp", faz: "Cria projeto com arquivos básicos" },
+      { fala: "lista a pasta projetos", faz: "Lista o conteúdo" },
+      { fala: "abre a pasta projetos", faz: "Abre no Explorer" },
+      { fala: "renomeia notas.txt para ideias.txt", faz: "Renomeia" },
+      { fala: "apaga o arquivo notas.txt", faz: "Apaga (pede confirmação)" },
+    ],
+  },
+  {
+    nome: "Música (player do HUD)",
+    icone: "bi-music-note-beamed",
+    comandos: [
+      { fala: "abre o player de música", faz: "Abre a janela do player (sem busca)" },
+      { fala: "tocar músicas do linkin park", faz: "Busca no YouTube e toca só o áudio no player do HUD" },
+      { fala: "toca playlist de rock nacional", faz: "Toca a playlist como lista de áudio" },
+      { fala: "toca o álbum The Wall de pink floyd", faz: "Busca o álbum completo (só áudio)" },
+      { fala: "quero ouvir bossa nova", faz: "Toca músicas do tema no player" },
+      { fala: "pausa a música / continua a música", faz: "Controla a reprodução por voz" },
+      { fala: "próxima música / música anterior", faz: "Navega na playlist" },
+      { fala: "aumenta o volume / abaixa o volume", faz: "Ajusta o volume por voz" },
+      { fala: "fecha o player de música", faz: "Fecha a janela do player" },
+    ],
+  },
+  {
+    nome: "Programas e aplicativos",
+    icone: "bi-app-indicator",
+    comandos: [
+      { fala: "abre o chrome / vscode / whatsapp…", faz: "Abre o programa instalado" },
+      { fala: "toca a música X no youtube", faz: "Abre o primeiro vídeo direto" },
+      { fala: "toca um vídeo do tiktok sobre Y", faz: "Abre o primeiro resultado direto" },
+      { fala: "pesquisa X no youtube", faz: "Abre o primeiro vídeo (assistir)" },
+      { fala: "abre o perfil do fulano no instagram", faz: "Abre o perfil" },
+    ],
+  },
+  {
+    nome: "Internet e pesquisa",
+    icone: "bi-globe2",
+    comandos: [
+      { fala: "pesquisa X no google", faz: "Busca no navegador real" },
+      { fala: "abre o site google.com", faz: "Abre o site numa aba do navegador real" },
+      { fala: "abre meu painel (atalho personalizado)", faz: "Abre o site que você salvou em MEUS SITES na janela de comandos" },
+      { fala: "mostra uma imagem de cachorros", faz: "Abre a imagem numa janela do HUD" },
+      { fala: "abre o site X", faz: "Abre o site numa aba do navegador real" },
+    ],
+  },
+  {
+    nome: "WhatsApp",
+    icone: "bi-whatsapp",
+    comandos: [
+      { fala: "manda mensagem para a mãe: bom dia", faz: "Envia no WhatsApp real (pede confirmação)" },
+      { fala: "abre o whatsapp", faz: "Janela no HUD com QR code, conversas e resposta" },
+      { fala: "leia o whatsapp", faz: "Lista as conversas recentes (sessão real)" },
+      { fala: "leia o whatsapp da mãe", faz: "Mostra as últimas mensagens do contato" },
+      { fala: "o número da mãe é 5511999999999", faz: "Guarda o contato na memória" },
+    ],
+  },
+  {
+    nome: "Tela e janelas",
+    icone: "bi-display",
+    comandos: [
+      { fala: "tira um print da tela", faz: "Salva screenshot em Imagens" },
+      { fala: "leia a tela / o que está na tela?", faz: "OCR nativo do Windows do conteúdo visível" },
+      { fala: "clica em Enviar", faz: "Clica no texto visível na tela" },
+      { fala: "digita olá mundo", faz: "Digita texto no campo focado (coordenadas reais)" },
+      { fala: "aperta enter / pressiona tab", faz: "Pressiona tecla especial (enter, tab, esc, ctrl+c…)" },
+      { fala: "descreve a tela", faz: "Modelo de visão descreve o que está na tela" },
+      { fala: "maximiza a janela do chrome", faz: "Controla a janela do programa" },
+      { fala: "quais janelas estão abertas?", faz: "Lista as janelas do Windows" },
+    ],
+  },
+  {
+    nome: "Câmera, gestos e saúde",
+    icone: "bi-camera-video",
+    comandos: [
+      { fala: "liga a câmera / mostra a câmera", faz: "Liga a câmera: gestos com as mãos (gira/zoom no orbe) + batimentos" },
+      { fala: "desliga a câmera / esconde a câmera", faz: "Desliga a câmera e para os gestos" },
+      { fala: "modo interface", faz: "Mãos controlam a UI: arrastam e redimensionam os painéis do HUD" },
+      { fala: "sai do modo interface", faz: "Volta os gestos para o orbe" },
+      { fala: "saúde / meus batimentos", faz: "Fala seus batimentos por minuto (rPPG pela câmera)" },
+    ],
+  },
+  {
+    nome: "Tarefas e anotações",
+    icone: "bi-check2-square",
+    comandos: [
+      { fala: "anota na minha lista: comprar pão", faz: "Adiciona tarefa" },
+      { fala: "quais são minhas tarefas?", faz: "Lista tarefas" },
+      { fala: "apaga a tarefa comprar pão", faz: "Remove tarefa" },
+      { fala: "anota uma anotação: ideia para o projeto", faz: "Guarda anotação longa" },
+      { fala: "quais são minhas anotações?", faz: "Lista anotações" },
+    ],
+  },
+  {
+    nome: "Rotinas",
+    icone: "bi-moon-stars",
+    comandos: [
+      { fala: "boa noite", faz: "Rotina da noite: fecha apps, agenda o despertador e resume a agenda (com confirmação)" },
+      { fala: "bom dia", faz: "Rotina da manhã: resume a agenda de hoje e fala o clima (com confirmação)" },
+      { fala: "executa a rotina boa noite", faz: "Executa a rotina pelo nome" },
+      { fala: "quais rotinas você tem?", faz: "Lista as rotinas disponíveis" },
+    ],
+  },
+  {
+    nome: "Registro de ações",
+    icone: "bi-clipboard-data",
+    comandos: [
+      { fala: "exibir log de erros", faz: "Abre o REGISTRO DE AÇÕES (tabela de falhas) no HUD" },
+      { fala: "análise de ações", faz: "Idem" },
+      { fala: "fecha o registro de ações", faz: "Fecha a janela" },
+    ],
+  },
+  {
+    nome: "Agenda e calendário",
+    icone: "bi-calendar3",
+    comandos: [
+      { fala: "abre o calendário / mostra a agenda", faz: "Abre a janela CALENDÁRIO no HUD" },
+      { fala: "fecha o calendário", faz: "Fecha a janela CALENDÁRIO" },
+      { fala: "marca reunião amanhã às 15h", faz: "Marca compromisso na agenda" },
+      { fala: "toda sexta às 10h reunião de time", faz: "Marca compromisso RECORRENTE (semanal)" },
+      { fala: "todo dia às 8h alongamento", faz: "Recorre diariamente" },
+      { fala: "todo dia 15 às 9h pagar aluguel", faz: "Recorre todo mês" },
+      { fala: "agenda consulta sexta-feira às 10h", faz: "Marca com dia da semana" },
+      { fala: "marca almoço dia 20 ao meio dia", faz: "Marca com data e hora" },
+      { fala: "o que tenho na agenda?", faz: "Lista os próximos compromissos" },
+      { fala: "agenda de hoje / compromissos de amanhã", faz: "Lista o dia" },
+      { fala: "remove da agenda a reunião de sexta", faz: "Desmarca o compromisso" },
+      { fala: "cancela o compromisso 2", faz: "Remove pelo número" },
+      { fala: "anota na minha lista: comprar pão", faz: "Continua funcionando como tarefa" },
+    ],
+  },
+  {
+    nome: "Memória",
+    icone: "bi-database",
+    comandos: [
+      { fala: "meu nome é Raphael", faz: "Guarda o nome" },
+      { fala: "guarde na memória que eu trabalho com design", faz: "Guarda fato" },
+      { fala: "esqueça o contato da mãe", faz: "Apaga da memória" },
+      { fala: "abre a memória (botão MEMÓRIA)", faz: "Painel editável no HUD" },
+    ],
+  },
+  {
+    nome: "Timers e lembretes",
+    icone: "bi-alarm",
+    comandos: [
+      { fala: "timer de 10 minutos", faz: "Cronômetro com aviso falado" },
+      { fala: "me lembre em 30 minutos de beber água", faz: "Lembrete" },
+      { fala: "cancela todos os timers", faz: "Cancela tudo" },
+    ],
+  },
+  {
+    nome: "Informações rápidas",
+    icone: "bi-lightning-charge",
+    comandos: [
+      { fala: "qual a previsão do tempo em São Paulo?", faz: "Previsão (API gratuita)" },
+      { fala: "quanto é 100 dólares em reais?", faz: "Câmbio" },
+      { fala: "cotação do bitcoin", faz: "Criptomoedas" },
+      { fala: "qual é a capital do Brasil?", faz: "Dados de países" },
+      { fala: "quanto é 5 km em metros?", faz: "Converte medidas" },
+      { fala: "conta uma piada", faz: "Piada em português" },
+    ],
+  },
+  {
+    nome: "Interface e temas",
+    icone: "bi-layout-sidebar",
+    comandos: [
+      { fala: "recolhe / expande os controles", faz: "Recolhe ou expande o painel" },
+      { fala: "mostrar comandos", faz: "Abre esta janela de comandos" },
+      { fala: "sem som / com som", faz: "Mudo do ARES" },
+      { fala: "voz feminina / voz masculina", faz: "Troca a voz do TTS" },
+    ],
+  },
+];
+
+/** Total de comandos catalogados. */
+export const TOTAL_COMANDOS = CATALOGO_COMANDOS.reduce(
+  (acc, c) => acc + c.comandos.length,
+  0,
+);
+
+/** Busca nos comandos por texto (case-insensitive, sem acento). */
+export function buscarComandos(
+  termo: string,
+): CategoriaComandos[] {
+  const q = (termo ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  if (!q) return CATALOGO_COMANDOS;
+  return CATALOGO_COMANDOS.map((cat) => ({
+    ...cat,
+    comandos: cat.comandos.filter((c) =>
+      `${c.fala} ${c.faz}`
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .includes(q),
+    ),
+  })).filter((cat) => cat.comandos.length > 0);
+}
