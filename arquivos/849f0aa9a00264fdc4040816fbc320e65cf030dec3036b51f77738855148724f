@@ -1,0 +1,72 @@
+import { NextResponse } from "next/server";
+import {
+  estadoPublicacao,
+  rodarScriptPublicacao,
+  empurrarParaGitHub,
+  versaoDoManifest,
+} from "@/lib/publicador";
+
+/**
+ * Botão "PUBLICAR ATUALIZAÇÃO" da interface (modo desenvolvedor).
+ * GET  → estado (disponível? repo? versão atual?)
+ * POST → gera o pacote (script) e envia para o GitHub.
+ */
+export async function GET() {
+  return NextResponse.json(estadoPublicacao());
+}
+
+export async function POST(req: Request) {
+  const st = estadoPublicacao();
+  if (!st.disponivel) {
+    return NextResponse.json({ ok: false, mensagem: st.motivo ?? "Publicação indisponível." }, { status: 403 });
+  }
+  // Corpo opcional: { notas?: string | string[], reiniciar?: boolean }
+  // notas: changelog (string da textarea ou array).
+  // reiniciar: exigeReinicio=true no manifest — os servidores dos usuários
+  // reiniciam após instalar (o código novo ativa na hora).
+  let notas = "";
+  let reiniciar = false;
+  try {
+    const corpo = (await req.json()) as { notas?: unknown; reiniciar?: unknown };
+    if (typeof corpo?.notas === "string") {
+      notas = corpo.notas;
+    } else if (
+      Array.isArray(corpo?.notas) &&
+      corpo.notas.every((n) => typeof n === "string")
+    ) {
+      notas = (corpo.notas as string[]).join("\n");
+    }
+    if (typeof corpo?.reiniciar === "boolean") reiniciar = corpo.reiniciar;
+  } catch {
+    /* sem corpo — publica sem notas */
+  }
+  // Guarda contra corrupção de encoding (U+FFFD = caractere de substituição,
+  // típico de acentos perdidos no caminho — ex.: codepage OEM do cmd.exe).
+  // Melhor falhar com mensagem clara do que publicar notas que aparecem
+  // como "�rea" na tela dos usuários.
+  if (notas.includes("\uFFFD")) {
+    return NextResponse.json(
+      {
+        ok: false,
+        mensagem:
+          "As notas contêm caracteres corrompidos (acentos perdidos). Apague e digite as notas novamente antes de publicar.",
+      },
+      { status: 400 },
+    );
+  }
+  const script = await rodarScriptPublicacao(notas, reiniciar);
+  if (!script.ok) {
+    return NextResponse.json(
+      { ok: false, mensagem: "Falha ao gerar o pacote de atualização.", saida: script.saida.slice(0, 2000) },
+      { status: 500 },
+    );
+  }
+  const push = await empurrarParaGitHub(st.repo!);
+  return NextResponse.json({
+    ok: push.ok,
+    mensagem: push.mensagem,
+    enviados: push.enviados,
+    versao: versaoDoManifest(),
+    saida: script.saida.slice(-800),
+  });
+}
