@@ -1,0 +1,77 @@
+import { NextResponse } from "next/server";
+import {
+  enviarFeedback,
+  listarFeedback,
+  limparFeedback,
+  removerFeedback,
+  definirCategoria,
+  type FeedbackCategoria,
+} from "@/lib/agent/feedback";
+
+export const runtime = "nodejs";
+
+/**
+ * Feedback e sugestões dos usuários.
+ *   POST  /api/feedback { texto }       → publica no MQTT (o dev recebe)
+ *   GET   /api/feedback                 → lista o feedback recebido (máquina do dev)
+ *   PATCH /api/feedback?id=<id> {categoria} → categoriza UM feedback (dev)
+ *   DELETE /api/feedback?id=<id>        → remove UM feedback (dev)
+ *   DELETE /api/feedback                → limpa tudo (dev)
+ */
+export async function POST(req: Request) {
+  let texto = "";
+  try {
+    const b = (await req.json()) as { texto?: unknown };
+    if (typeof b?.texto === "string") texto = b.texto.trim();
+  } catch {
+    /* corpo ausente */
+  }
+  if (!texto) {
+    return NextResponse.json({ ok: false, mensagem: "Escreva um feedback antes de enviar." }, { status: 400 });
+  }
+  enviarFeedback(texto);
+  return NextResponse.json({ ok: true, mensagem: "Feedback enviado. Obrigado!" });
+}
+
+export async function GET() {
+  return NextResponse.json({ feedback: listarFeedback() });
+}
+
+const VALIDAS: FeedbackCategoria[] = ["bug", "sugestao", "elogio", "outro"];
+
+export async function PATCH(req: Request) {
+  const url = new URL(req.url);
+  const idRaw = url.searchParams.get("id");
+  if (idRaw === null) {
+    return NextResponse.json({ ok: false, message: "Informe ?id=<id> do feedback." }, { status: 400 });
+  }
+  const id = Number(idRaw);
+  if (!Number.isFinite(id)) {
+    return NextResponse.json({ ok: false, message: "Id inválido." }, { status: 400 });
+  }
+  let categoria = "";
+  try {
+    const b = (await req.json()) as { categoria?: unknown };
+    if (typeof b?.categoria === "string") categoria = b.categoria.trim();
+  } catch {
+    /* corpo ausente */
+  }
+  if (!VALIDAS.includes(categoria as FeedbackCategoria)) {
+    return NextResponse.json(
+      { ok: false, message: "Categoria inválida (use bug, sugestao, elogio ou outro)." },
+      { status: 400 },
+    );
+  }
+  return NextResponse.json(definirCategoria(id, categoria as FeedbackCategoria));
+}
+
+export async function DELETE(req: Request) {
+  const url = new URL(req.url);
+  const idRaw = url.searchParams.get("id");
+  if (idRaw !== null) {
+    const id = Number(idRaw);
+    if (Number.isFinite(id)) return NextResponse.json(removerFeedback(id));
+    return NextResponse.json({ ok: false, message: "Id inválido." }, { status: 400 });
+  }
+  return NextResponse.json(limparFeedback());
+}
