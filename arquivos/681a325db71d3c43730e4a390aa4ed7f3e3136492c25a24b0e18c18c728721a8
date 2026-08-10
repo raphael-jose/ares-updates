@@ -1,0 +1,160 @@
+/**
+ * Classificação de arquivos por extensão para o HUD: o explorer abre cada
+ * arquivo no módulo certo (Office, imagem, vídeo, texto) e a rota /api/media
+ * usa o mesmo mapa para servir o MIME. Sem dependências (testável).
+ */
+
+export const OFFICE_EXTS = [".docx", ".xlsx", ".pptx"] as const;
+export const IMAGE_EXTS = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".svg",
+  ".ico",
+  ".avif",
+  ".tif",
+  ".tiff",
+] as const;
+export const VIDEO_EXTS = [
+  ".mp4",
+  ".m4v",
+  ".webm",
+  ".ogv",
+  ".ogg",
+  ".mov",
+  ".mkv",
+  ".avi",
+  ".wmv",
+  ".flv",
+  ".mpg",
+  ".mpeg",
+  ".3gp",
+  ".ts",
+] as const;
+export const TEXT_EXTS = [
+  ".txt",
+  ".md",
+  ".log",
+  ".json",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".py",
+  ".css",
+  ".scss",
+  ".less",
+  ".html",
+  ".htm",
+  ".xml",
+  ".yml",
+  ".yaml",
+  ".toml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".env",
+  ".gitignore",
+  ".c",
+  ".h",
+  ".cpp",
+  ".hpp",
+  ".cs",
+  ".java",
+  ".kt",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
+  ".sql",
+  ".sh",
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".swift",
+  ".svelte",
+  ".vue",
+  ".astro",
+  ".dockerfile",
+  ".csv",
+] as const;
+
+export type FileKind = "office" | "imagem" | "video" | "texto" | "outro";
+
+/**
+ * Extrai o ID de um vídeo do YouTube de uma URL (watch?v= ou youtu.be).
+ * Devolve null quando a URL não é de um vídeo do YouTube.
+ */
+export function youtubeVideoId(url: string): string | null {
+  const m = (url ?? "").match(
+    /(?:(?:www\.|music\.|m\.)?youtube\.com\/(?:watch\?v=|shorts\/|embed\/|v\/)|youtu\.be\/)([\w-]{6,})/i,
+  );
+  return m ? m[1] : null;
+}
+
+/**
+ * Extensão minúscula de um caminho ("FILME.MKV" → ".mkv"; sem ponto → "").
+ * Dotfiles (" .env", ".gitignore") devolvem o nome inteiro como extensão.
+ */
+export function extOf(p: string): string {
+  const name = (p ?? "").split(/[\\/]/).pop() ?? "";
+  const i = name.lastIndexOf(".");
+  if (i < 0) return "";
+  if (i === 0) return name.toLowerCase();
+  return name.slice(i).toLowerCase();
+}
+
+/**
+ * Classifica um arquivo pelo módulo do HUD que deve abri-lo. A ordem importa:
+ * ".ts" é TypeScript no explorer do HUD (texto) — MPEG-TS de vídeo é raro, e
+ * o vídeo ainda abre pelo player se o usuário pedir explicitamente.
+ */
+export function kindOf(p: string): FileKind {
+  const e = extOf(p);
+  if ((OFFICE_EXTS as readonly string[]).includes(e)) return "office";
+  if ((IMAGE_EXTS as readonly string[]).includes(e)) return "imagem";
+  if ((TEXT_EXTS as readonly string[]).includes(e)) return "texto";
+  if ((VIDEO_EXTS as readonly string[]).includes(e)) return "video";
+  // Arquivos especiais sem ponto (Dockerfile, Makefile…)
+  const name = (p ?? "").split(/[\\/]/).pop() ?? "";
+  if (/^(dockerfile|makefile|gemfile|rakefile)$/i.test(name)) return "texto";
+  return "outro";
+}
+
+const MIME_MAP: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".avif": "image/avif",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".webm": "video/webm",
+  ".ogv": "video/ogg",
+  ".ogg": "video/ogg",
+  ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska",
+  ".avi": "video/x-msvideo",
+  ".wmv": "video/x-ms-wmv",
+  ".flv": "video/x-flv",
+  ".mpg": "video/mpeg",
+  ".mpeg": "video/mpeg",
+  ".3gp": "video/3gpp",
+  ".ts": "video/mp2t",
+};
+
+/** MIME de um arquivo (pela extensão; fallback genérico). */
+export function mimeOf(p: string): string {
+  return MIME_MAP[extOf(p)] ?? "application/octet-stream";
+}
