@@ -1,12 +1,9 @@
 {
-  "versao": "20260810-140826",
+  "versao": "20260810-141353",
   "npm": false,
-  "exigeReinicio": true,
+  "exigeReinicio": false,
   "notas": [
-    "Servidor 100% em segundo plano: nenhuma janela de terminal abre ao instalar atualizações nem ao iniciar o app",
-    "Acesso rápido no menu CONFIGURAÇÕES: finanças, erros e memória agora abrem pelo CONFIG",
-    "A Arthemis responde 'o que há de novo?': ela fala as novidades das últimas atualizações",
-    "Opção 'Receber telemetria do dev' só aparece na máquina do desenvolvedor"
+    "Modo desenvolvedor oculto no menu CONFIGURAÇÕES para usuários (só aparece na máquina do dev)"
   ],
   "arquivos": [
     {
@@ -141,8 +138,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/26fc29594709ee5c2fda142a08e2515a1f804b88197d02274cf776212891f619",
-      "sha256": "26fc29594709ee5c2fda142a08e2515a1f804b88197d02274cf776212891f619"
+      "url": "arquivos/eeef370cb3b60d692bbcc2f675b3414e14cf651a70255690af4e79b3b2a7395c",
+      "sha256": "eeef370cb3b60d692bbcc2f675b3414e14cf651a70255690af4e79b3b2a7395c"
     },
     {
       "caminho": "instrumentation.ts",
