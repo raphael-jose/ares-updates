@@ -1,13 +1,7 @@
 {
-  "versao": "20260810-121730",
+  "versao": "20260810-122422",
   "npm": false,
   "exigeReinicio": true,
-  "notas": [
-    "Feedback agora é ilimitado: textos longos são divididos em partes e chegam COMPLETOS ao desenvolvedor (antes cortava em 2000 caracteres)",
-    "Respostas do desenvolvedor também sem limite de tamanho",
-    "Correção do arthemis.bat: o launcher agora sobe o servidor e abre o navegador corretamente",
-    "Notas de versão corrigidas — acentos preservados (encoding UTF-8 garantido na publicação)"
-  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
