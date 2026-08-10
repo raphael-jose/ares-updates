@@ -1,22 +1,12 @@
 {
-  "versao": "20260809-234134",
+  "versao": "20260809-234205",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "arthemis.bat",
-      "url": "arquivos/5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e",
-      "sha256": "5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e"
-    },
-    {
-      "caminho": "loading.py",
-      "url": "arquivos/62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4",
-      "sha256": "62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4"
-    },
-    {
-      "caminho": "__pycache__/loading.cpython-314.pyc",
-      "url": "arquivos/df4f0704f68c96d0387e70c4dcf747173a6292e510b91389e767527d1ad0d0ed",
-      "sha256": "df4f0704f68c96d0387e70c4dcf747173a6292e510b91389e767527d1ad0d0ed"
+      "caminho": "scripts/publicar-atualizacao.ts",
+      "url": "arquivos/8c95d105d6bed26f770c85ac20dedf8be74b1db120a3d26450da336586d4d052",
+      "sha256": "8c95d105d6bed26f770c85ac20dedf8be74b1db120a3d26450da336586d4d052"
     }
   ]
 }
