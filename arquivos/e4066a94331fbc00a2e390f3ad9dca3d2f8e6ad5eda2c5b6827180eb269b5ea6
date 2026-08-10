@@ -1,0 +1,8 @@
+import AresOrb from "@/components/AresOrb";
+
+export default function Home() {
+  // KIWI_ECO=1 força o modo econômico do orbe (iGPU fraca / máquina modesta).
+  // Sem ele, o próprio navegador detecta e ativa sozinho; ?eco=1 na URL também força.
+  const defaultEco = process.env.KIWI_ECO === "1";
+  return <AresOrb defaultEco={defaultEco} />;
+}
