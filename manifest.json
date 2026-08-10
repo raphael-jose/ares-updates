@@ -1,10 +1,10 @@
 {
-  "versao": "20260810-151435",
+  "versao": "20260810-153757",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat: envio resiliente — mensagens sobrevivem a quedas curtas (reconexão automática) e o texto digitado nunca se perde em caso de falha",
-    "Chat: status honesto — contato só aparece online quando o canal está realmente aberto; avisos claros quando a conexão cai"
+    "Chat P2P: entrega em tempo real - mensagens que chegam durante o handshake sao guardadas e entregues (fila pre-sessao), e abrir o chat re-dispara a conexao de contatos desconectados.",
+    "Chat P2P: status honesto e diagnostico NAT - presenca do broker nao e mais confundida com conexao; contato presente sem canal mostra 'conectando', com dica de NAT e botao reconectar (sem remover o contato)."
   ],
   "arquivos": [
     {
@@ -109,8 +109,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/b2450b505c71945fed88797bc82c71c0acbd949889916ce536d52641a9fdcde5",
-      "sha256": "b2450b505c71945fed88797bc82c71c0acbd949889916ce536d52641a9fdcde5"
+      "url": "arquivos/14fcfedf39d2ea12c8531e13656690e48a657550e489b61927164c69f61c8bae",
+      "sha256": "14fcfedf39d2ea12c8531e13656690e48a657550e489b61927164c69f61c8bae"
     },
     {
       "caminho": "app/icon.svg",
@@ -139,8 +139,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/4b3864edbec001998cb3b93c24fc898f3acc86f98e1258fb714b5d99ce7bd3c1",
-      "sha256": "4b3864edbec001998cb3b93c24fc898f3acc86f98e1258fb714b5d99ce7bd3c1"
+      "url": "arquivos/75e73f2f6e2d9b9e4227b1d8f00987582d9b36c48ff5a29eed7be5bedad57499",
+      "sha256": "75e73f2f6e2d9b9e4227b1d8f00987582d9b36c48ff5a29eed7be5bedad57499"
     },
     {
       "caminho": "instrumentation.ts",
@@ -229,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/6030d581a62c5d68f6b75be41707d656edeca234d52447e2630721b470c37427",
-      "sha256": "6030d581a62c5d68f6b75be41707d656edeca234d52447e2630721b470c37427"
+      "url": "arquivos/28485551d567f10e1a2b010f9efd6dc22a1711aad8d13f0b6836f7e5cd192e93",
+      "sha256": "28485551d567f10e1a2b010f9efd6dc22a1711aad8d13f0b6836f7e5cd192e93"
     },
     {
       "caminho": "lib/agent/project.ts",
