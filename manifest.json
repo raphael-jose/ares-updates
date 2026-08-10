@@ -1,12 +1,402 @@
 {
-  "versao": "20260809-234205",
+  "versao": "20260809-234503",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
+      "caminho": "app/api/agenda/route.ts",
+      "url": "arquivos/7bee0c3216e27c3da26861c995573f8625fe87163985dabbe1634fbd25fb4a81",
+      "sha256": "7bee0c3216e27c3da26861c995573f8625fe87163985dabbe1634fbd25fb4a81"
+    },
+    {
+      "caminho": "app/api/ai/route.ts",
+      "url": "arquivos/2ac53e96c174437fa18978e6278b3b23ed63b9e0b3de2d7b3f6b7edfeb5b99c1",
+      "sha256": "2ac53e96c174437fa18978e6278b3b23ed63b9e0b3de2d7b3f6b7edfeb5b99c1"
+    },
+    {
+      "caminho": "app/api/audio/route.ts",
+      "url": "arquivos/98f6a4769d7a3acc74a71412a1d205342e129043162cac842bb78f0117df28ee",
+      "sha256": "98f6a4769d7a3acc74a71412a1d205342e129043162cac842bb78f0117df28ee"
+    },
+    {
+      "caminho": "app/api/confirm/route.ts",
+      "url": "arquivos/37d77277854884620348e865fc7d50fcfdfe201f7736de992e87df1ef2b91998",
+      "sha256": "37d77277854884620348e865fc7d50fcfdfe201f7736de992e87df1ef2b91998"
+    },
+    {
+      "caminho": "app/api/erros/route.ts",
+      "url": "arquivos/f440f30f4ebc99f11e92911d5bc6c464e16597e52e3838b39cbab28c0e96c7d4",
+      "sha256": "f440f30f4ebc99f11e92911d5bc6c464e16597e52e3838b39cbab28c0e96c7d4"
+    },
+    {
+      "caminho": "app/api/finance/route.ts",
+      "url": "arquivos/7574453adbc549be2d0738005e8725f5217bb43489ffdfbf70d2fe9c8572da92",
+      "sha256": "7574453adbc549be2d0738005e8725f5217bb43489ffdfbf70d2fe9c8572da92"
+    },
+    {
+      "caminho": "app/api/hermes/route.ts",
+      "url": "arquivos/8687110c73bb822fb69bf4fc861a7f7cb6928972edb12b3f8d5b6405980ffac1",
+      "sha256": "8687110c73bb822fb69bf4fc861a7f7cb6928972edb12b3f8d5b6405980ffac1"
+    },
+    {
+      "caminho": "app/api/media/route.ts",
+      "url": "arquivos/f07d39345b49a8489c6cc2f2cf4fe1ab2ac25be40efe7d6acbe370a21406c8c1",
+      "sha256": "f07d39345b49a8489c6cc2f2cf4fe1ab2ac25be40efe7d6acbe370a21406c8c1"
+    },
+    {
+      "caminho": "app/api/memory/route.ts",
+      "url": "arquivos/1b607da086c3bf345216cc50a80d4332dab7f29b949db926d8e777093fe007a9",
+      "sha256": "1b607da086c3bf345216cc50a80d4332dab7f29b949db926d8e777093fe007a9"
+    },
+    {
+      "caminho": "app/api/publish/route.ts",
+      "url": "arquivos/c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d",
+      "sha256": "c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d"
+    },
+    {
+      "caminho": "app/api/resumo/route.ts",
+      "url": "arquivos/0dc23f913f8e72d923f9d3369c312823f8e288589aaf29898b85eb97f9663114",
+      "sha256": "0dc23f913f8e72d923f9d3369c312823f8e288589aaf29898b85eb97f9663114"
+    },
+    {
+      "caminho": "app/api/sinal/route.ts",
+      "url": "arquivos/0cbfc006e640f52c08e90e5fd430d2bcd87483bc5e86eb28738350870dae399e",
+      "sha256": "0cbfc006e640f52c08e90e5fd430d2bcd87483bc5e86eb28738350870dae399e"
+    },
+    {
+      "caminho": "app/api/tts/route.ts",
+      "url": "arquivos/a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101",
+      "sha256": "a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101"
+    },
+    {
+      "caminho": "app/api/turn/route.ts",
+      "url": "arquivos/c2b465f0db424cca7b1fd7c6a3188b553b789ba14e264d007db70099fc5045fe",
+      "sha256": "c2b465f0db424cca7b1fd7c6a3188b553b789ba14e264d007db70099fc5045fe"
+    },
+    {
+      "caminho": "app/api/updates/route.ts",
+      "url": "arquivos/d06b657869f8818cd61da73dfe951a97dae1be73632447db30676f9b0b9cbd7c",
+      "sha256": "d06b657869f8818cd61da73dfe951a97dae1be73632447db30676f9b0b9cbd7c"
+    },
+    {
+      "caminho": "app/api/whatsapp/route.ts",
+      "url": "arquivos/6ec16855db0d96504ac2b5e9a5ed45285eaea496668793ed3c7ddd9c579dc206",
+      "sha256": "6ec16855db0d96504ac2b5e9a5ed45285eaea496668793ed3c7ddd9c579dc206"
+    },
+    {
+      "caminho": "app/globals.css",
+      "url": "arquivos/6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b",
+      "sha256": "6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b"
+    },
+    {
+      "caminho": "app/icon.svg",
+      "url": "arquivos/6f109b9ee4fb09d1450f43067d2abe371c7b4b9c80063f236ad710655d78305f",
+      "sha256": "6f109b9ee4fb09d1450f43067d2abe371c7b4b9c80063f236ad710655d78305f"
+    },
+    {
+      "caminho": "app/layout.tsx",
+      "url": "arquivos/ddaa8973278e4136e47a5c5252bec2e956bea6c2efb8c4cd8c8984cc085fdf58",
+      "sha256": "ddaa8973278e4136e47a5c5252bec2e956bea6c2efb8c4cd8c8984cc085fdf58"
+    },
+    {
+      "caminho": "app/page.tsx",
+      "url": "arquivos/e4066a94331fbc00a2e390f3ad9dca3d2f8e6ad5eda2c5b6827180eb269b5ea6",
+      "sha256": "e4066a94331fbc00a2e390f3ad9dca3d2f8e6ad5eda2c5b6827180eb269b5ea6"
+    },
+    {
+      "caminho": "arthemis.bat",
+      "url": "arquivos/5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e",
+      "sha256": "5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e"
+    },
+    {
+      "caminho": "COMANDOS.md",
+      "url": "arquivos/e5851b8edd08c1cd1f3f81e39fe1ed184b486380a15821f6e9654827960581b7",
+      "sha256": "e5851b8edd08c1cd1f3f81e39fe1ed184b486380a15821f6e9654827960581b7"
+    },
+    {
+      "caminho": "components/AresOrb.tsx",
+      "url": "arquivos/2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a",
+      "sha256": "2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a"
+    },
+    {
+      "caminho": "docs/screenshot.png",
+      "url": "arquivos/fbf9afc7c62529890df5b7e58118f2e13deb43720af7284ef7e32605825ac862",
+      "sha256": "fbf9afc7c62529890df5b7e58118f2e13deb43720af7284ef7e32605825ac862"
+    },
+    {
+      "caminho": "instrumentation.ts",
+      "url": "arquivos/89337a99ee8119961a26f380c36a6395b3978f1979e19c22744d8b61c937ae76",
+      "sha256": "89337a99ee8119961a26f380c36a6395b3978f1979e19c22744d8b61c937ae76"
+    },
+    {
+      "caminho": "lib/agent/builtin.ts",
+      "url": "arquivos/e5df2f6e6511dacacec54c0cfec49a10bd9ec0bbb6acf8eacf6c4279f61c0406",
+      "sha256": "e5df2f6e6511dacacec54c0cfec49a10bd9ec0bbb6acf8eacf6c4279f61c0406"
+    },
+    {
+      "caminho": "lib/agent/builtinTypes.ts",
+      "url": "arquivos/6fca4db11306229a1a74ad5560c42018fdceea5334663568d2ab0681f4dc0800",
+      "sha256": "6fca4db11306229a1a74ad5560c42018fdceea5334663568d2ab0681f4dc0800"
+    },
+    {
+      "caminho": "lib/agent/conversation.ts",
+      "url": "arquivos/a67f30b13fc952fda99a21ec509cd942160553d3e9804433129626b34e5b5959",
+      "sha256": "a67f30b13fc952fda99a21ec509cd942160553d3e9804433129626b34e5b5959"
+    },
+    {
+      "caminho": "lib/agent/erros.ts",
+      "url": "arquivos/103942622ef4704f14ee4ee447402c050860b4613455bf017fabc1322ba212cf",
+      "sha256": "103942622ef4704f14ee4ee447402c050860b4613455bf017fabc1322ba212cf"
+    },
+    {
+      "caminho": "lib/agent/executor.ts",
+      "url": "arquivos/67624637fcfa836cbf1cfe0d85e782027b2cee8bda2cbe702c709a4f63a71347",
+      "sha256": "67624637fcfa836cbf1cfe0d85e782027b2cee8bda2cbe702c709a4f63a71347"
+    },
+    {
+      "caminho": "lib/agent/finance.ts",
+      "url": "arquivos/2358a0bfaa96233d1120f752f158cbd26171930b4b71b9c2e96cf6419cd8e477",
+      "sha256": "2358a0bfaa96233d1120f752f158cbd26171930b4b71b9c2e96cf6419cd8e477"
+    },
+    {
+      "caminho": "lib/agent/hermes.ts",
+      "url": "arquivos/097b89dbf0ee2bf7945440f76babdb2b8859c9dd2ce0c2e97ae5cf724db8f666",
+      "sha256": "097b89dbf0ee2bf7945440f76babdb2b8859c9dd2ce0c2e97ae5cf724db8f666"
+    },
+    {
+      "caminho": "lib/agent/identity.ts",
+      "url": "arquivos/cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa",
+      "sha256": "cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa"
+    },
+    {
+      "caminho": "lib/agent/index.ts",
+      "url": "arquivos/7358d86e61395ad765bfa2e5c2cf54adc44a7451455673093cd4a99d97b16547",
+      "sha256": "7358d86e61395ad765bfa2e5c2cf54adc44a7451455673093cd4a99d97b16547"
+    },
+    {
+      "caminho": "lib/agent/keys.ts",
+      "url": "arquivos/4cd0721d317286df610d2973b2c66a78674f8c6b092cb59621dd88ef3692d29e",
+      "sha256": "4cd0721d317286df610d2973b2c66a78674f8c6b092cb59621dd88ef3692d29e"
+    },
+    {
+      "caminho": "lib/agent/llm.ts",
+      "url": "arquivos/d2fe72b4a95db9126004ae92c5318d5701455830fa5a2d79bb513332dd7e8895",
+      "sha256": "d2fe72b4a95db9126004ae92c5318d5701455830fa5a2d79bb513332dd7e8895"
+    },
+    {
+      "caminho": "lib/agent/memory.ts",
+      "url": "arquivos/08a881bcacef582511a0d478e9c13a6ec3b74dd1ce9cf9be8bc33e9afede249e",
+      "sha256": "08a881bcacef582511a0d478e9c13a6ec3b74dd1ce9cf9be8bc33e9afede249e"
+    },
+    {
+      "caminho": "lib/agent/mqtt.ts",
+      "url": "arquivos/a6f5828a5f06f346272e426d90247e430a2cc738642201ff25f4a4c34e82634c",
+      "sha256": "a6f5828a5f06f346272e426d90247e430a2cc738642201ff25f4a4c34e82634c"
+    },
+    {
+      "caminho": "lib/agent/music.ts",
+      "url": "arquivos/f63401eb195bbe7381be5a4a5621e210a8743b0ddf4038ca778af5e0841d2fbc",
+      "sha256": "f63401eb195bbe7381be5a4a5621e210a8743b0ddf4038ca778af5e0841d2fbc"
+    },
+    {
+      "caminho": "lib/agent/peer.ts",
+      "url": "arquivos/36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e",
+      "sha256": "36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e"
+    },
+    {
+      "caminho": "lib/agent/project.ts",
+      "url": "arquivos/6cb54e3d3e5187ff2de1d72d0a987adb8b2c8b8266a6a66840c4ac5827fa24ab",
+      "sha256": "6cb54e3d3e5187ff2de1d72d0a987adb8b2c8b8266a6a66840c4ac5827fa24ab"
+    },
+    {
+      "caminho": "lib/agent/routines.ts",
+      "url": "arquivos/2279cfc726c175387a4b1a68f22ee8560110f374938aba24ea345b1e651a5faf",
+      "sha256": "2279cfc726c175387a4b1a68f22ee8560110f374938aba24ea345b1e651a5faf"
+    },
+    {
+      "caminho": "lib/agent/sinal.ts",
+      "url": "arquivos/15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109",
+      "sha256": "15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109"
+    },
+    {
+      "caminho": "lib/agent/tools.ts",
+      "url": "arquivos/28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a",
+      "sha256": "28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a"
+    },
+    {
+      "caminho": "lib/agent/types.ts",
+      "url": "arquivos/ddb0c2193d4575295fbf0b233fb03af1eba4cf8232d07c87167aa50e5fde3aea",
+      "sha256": "ddb0c2193d4575295fbf0b233fb03af1eba4cf8232d07c87167aa50e5fde3aea"
+    },
+    {
+      "caminho": "lib/agent/units.ts",
+      "url": "arquivos/b7d5cf8b8a15af19d475a173e184880933117403c742cfa75db627874ac7648c",
+      "sha256": "b7d5cf8b8a15af19d475a173e184880933117403c742cfa75db627874ac7648c"
+    },
+    {
+      "caminho": "lib/agent/vision.ts",
+      "url": "arquivos/e42039692f2a8c7a8e9d36e025ec6bca329d4775116f5ce0c63e2b949be1e5ed",
+      "sha256": "e42039692f2a8c7a8e9d36e025ec6bca329d4775116f5ce0c63e2b949be1e5ed"
+    },
+    {
+      "caminho": "lib/agent/whatsapp.ts",
+      "url": "arquivos/f74b716769a5c4603cbfc1d2cd613bfae02cc40e681379a76d6f32700920fa47",
+      "sha256": "f74b716769a5c4603cbfc1d2cd613bfae02cc40e681379a76d6f32700920fa47"
+    },
+    {
+      "caminho": "lib/agent/wikimedia.ts",
+      "url": "arquivos/74aaec73ddd2e84c2294ce6bffc748e10a4e6e5389b6a64878b4fe633a58e6fc",
+      "sha256": "74aaec73ddd2e84c2294ce6bffc748e10a4e6e5389b6a64878b4fe633a58e6fc"
+    },
+    {
+      "caminho": "lib/assistant.ts",
+      "url": "arquivos/8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48",
+      "sha256": "8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48"
+    },
+    {
+      "caminho": "lib/atualizador.ts",
+      "url": "arquivos/5345a32fd42534b260ba937d966c734c48f8601a1913199869071e651b1843bd",
+      "sha256": "5345a32fd42534b260ba937d966c734c48f8601a1913199869071e651b1843bd"
+    },
+    {
+      "caminho": "lib/bilingual.ts",
+      "url": "arquivos/57d6ddf7ad92d1a460da490d689f3ffa4118f5f0e330b3bda34857ce31604018",
+      "sha256": "57d6ddf7ad92d1a460da490d689f3ffa4118f5f0e330b3bda34857ce31604018"
+    },
+    {
+      "caminho": "lib/comandos.ts",
+      "url": "arquivos/7fa4cd8a33725bba3b24aa607d4f8f177b786f88104b14d9d7550d4be85a3a72",
+      "sha256": "7fa4cd8a33725bba3b24aa607d4f8f177b786f88104b14d9d7550d4be85a3a72"
+    },
+    {
+      "caminho": "lib/handTracker.ts",
+      "url": "arquivos/04364219751e9ab3acb03ac2f0b6261199890c3d1bc0435453b039a3eb97eca1",
+      "sha256": "04364219751e9ab3acb03ac2f0b6261199890c3d1bc0435453b039a3eb97eca1"
+    },
+    {
+      "caminho": "lib/media.ts",
+      "url": "arquivos/681a325db71d3c43730e4a390aa4ed7f3e3136492c25a24b0e18c18c728721a8",
+      "sha256": "681a325db71d3c43730e4a390aa4ed7f3e3136492c25a24b0e18c18c728721a8"
+    },
+    {
+      "caminho": "lib/orbScene.ts",
+      "url": "arquivos/c08e79949b2ef9a16b6bd116ffa0d60e83cd2612cce0ec0e41c478002fb34263",
+      "sha256": "c08e79949b2ef9a16b6bd116ffa0d60e83cd2612cce0ec0e41c478002fb34263"
+    },
+    {
+      "caminho": "lib/publicador.ts",
+      "url": "arquivos/99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296",
+      "sha256": "99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296"
+    },
+    {
+      "caminho": "lib/rppg.ts",
+      "url": "arquivos/22c869c6b845b765a6befa464ef876e9e1528b60931875e834181afaa8732974",
+      "sha256": "22c869c6b845b765a6befa464ef876e9e1528b60931875e834181afaa8732974"
+    },
+    {
+      "caminho": "lib/sentiment.ts",
+      "url": "arquivos/ba96cda35e5f70bcc797a5c6f5e4277f9ba6c04bfba4cd11b3ee7cd72b67b547",
+      "sha256": "ba96cda35e5f70bcc797a5c6f5e4277f9ba6c04bfba4cd11b3ee7cd72b67b547"
+    },
+    {
+      "caminho": "lib/theme.ts",
+      "url": "arquivos/36e662cd52566a3fc22cced0c32f457fc45140ae52e451543d6883648bd8b547",
+      "sha256": "36e662cd52566a3fc22cced0c32f457fc45140ae52e451543d6883648bd8b547"
+    },
+    {
+      "caminho": "lib/tts-cache.ts",
+      "url": "arquivos/94abb0a20728ef9cf2002814866fc62ab4a4703369bed37cb8e07f9726c83ca7",
+      "sha256": "94abb0a20728ef9cf2002814866fc62ab4a4703369bed37cb8e07f9726c83ca7"
+    },
+    {
+      "caminho": "lib/voice.ts",
+      "url": "arquivos/4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f",
+      "sha256": "4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f"
+    },
+    {
+      "caminho": "lib/wellness.ts",
+      "url": "arquivos/22363b5e8c8e6019bab64d4a73cf9fb7a26a7d2ec79a2266917ba64c7d175a79",
+      "sha256": "22363b5e8c8e6019bab64d4a73cf9fb7a26a7d2ec79a2266917ba64c7d175a79"
+    },
+    {
+      "caminho": "LICENSE",
+      "url": "arquivos/5ba6cba9f789de687c6a3f2f8397f302c05b0cf36d95550c6b74304f0892e43e",
+      "sha256": "5ba6cba9f789de687c6a3f2f8397f302c05b0cf36d95550c6b74304f0892e43e"
+    },
+    {
+      "caminho": "loading.py",
+      "url": "arquivos/62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4",
+      "sha256": "62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4"
+    },
+    {
+      "caminho": "next-env.d.ts",
+      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
+      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
+    },
+    {
+      "caminho": "next.config.ts",
+      "url": "arquivos/f328a7d3e2083a71204e067f571bd7a28d9d00de0d868dfcbfd1f4ec447bc276",
+      "sha256": "f328a7d3e2083a71204e067f571bd7a28d9d00de0d868dfcbfd1f4ec447bc276"
+    },
+    {
+      "caminho": "package-lock.json",
+      "url": "arquivos/801f0102571358ebfb28cea74771a5f53e724af8a797d1924ffdc445b85cbd12",
+      "sha256": "801f0102571358ebfb28cea74771a5f53e724af8a797d1924ffdc445b85cbd12"
+    },
+    {
+      "caminho": "package.json",
+      "url": "arquivos/7f2f19c7feb1020f1dc7f942498cb46453bba2288e16aabbfb58f1e530386f3c",
+      "sha256": "7f2f19c7feb1020f1dc7f942498cb46453bba2288e16aabbfb58f1e530386f3c"
+    },
+    {
+      "caminho": "por.traineddata",
+      "url": "arquivos/42fab1f017aedab69b92bdecc01bbb11166cd3b177575612ee860f8e2825ece0",
+      "sha256": "42fab1f017aedab69b92bdecc01bbb11166cd3b177575612ee860f8e2825ece0"
+    },
+    {
+      "caminho": "public/maplibre/maplibre-gl-shared.mjs",
+      "url": "arquivos/7306565d651d8fdcca8ca5492ce55c1c6753468d1599144a3a914ccb51abe82b",
+      "sha256": "7306565d651d8fdcca8ca5492ce55c1c6753468d1599144a3a914ccb51abe82b"
+    },
+    {
+      "caminho": "public/maplibre/maplibre-gl-worker.mjs",
+      "url": "arquivos/f63e82e1dc5d251676ca55823adf0ef3aa06bd233674123e33bf842f953ea64c",
+      "sha256": "f63e82e1dc5d251676ca55823adf0ef3aa06bd233674123e33bf842f953ea64c"
+    },
+    {
+      "caminho": "README.md",
+      "url": "arquivos/8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2",
+      "sha256": "8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2"
+    },
+    {
+      "caminho": "removidos-backup-2026-08-09.zip",
+      "url": "arquivos/8ad83c66968dae13dfeadffe64f04b9fb2420f06f9cac2389c2c9cb604fe1887",
+      "sha256": "8ad83c66968dae13dfeadffe64f04b9fb2420f06f9cac2389c2c9cb604fe1887"
+    },
+    {
+      "caminho": "scripts/ares-cli.ts",
+      "url": "arquivos/149d465a1e893d164f91278d9a1823da081005a70e9699bf71ee8f37ad7fe7ee",
+      "sha256": "149d465a1e893d164f91278d9a1823da081005a70e9699bf71ee8f37ad7fe7ee"
+    },
+    {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/8c95d105d6bed26f770c85ac20dedf8be74b1db120a3d26450da336586d4d052",
-      "sha256": "8c95d105d6bed26f770c85ac20dedf8be74b1db120a3d26450da336586d4d052"
+      "url": "arquivos/5013d0f8376f9769cdb1533a9ebc5a5e547a4445d57f45832dc2ab2b08086294",
+      "sha256": "5013d0f8376f9769cdb1533a9ebc5a5e547a4445d57f45832dc2ab2b08086294"
+    },
+    {
+      "caminho": "scripts/whatsapp-server.ts",
+      "url": "arquivos/edaee3de0c76cf40ae95e512bec904e26d8b4345b02d6684bf3017edc54df032",
+      "sha256": "edaee3de0c76cf40ae95e512bec904e26d8b4345b02d6684bf3017edc54df032"
+    },
+    {
+      "caminho": "scripts/yt-dlp.exe",
+      "url": "arquivos/52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
+      "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
+    },
+    {
+      "caminho": "tsconfig.json",
+      "url": "arquivos/4327e4c2b0c072126391ea9a12a8e378b8b237db7778498b90f7370b7cfe8b78",
+      "sha256": "4327e4c2b0c072126391ea9a12a8e378b8b237db7778498b90f7370b7cfe8b78"
     }
   ]
 }
