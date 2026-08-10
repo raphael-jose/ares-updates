@@ -1,0 +1,245 @@
+import { NextRequest, NextResponse } from "next/server";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import os from "os";
+import path from "path";
+import crypto from "crypto";
+import fs from "fs/promises";
+import { hasEnglishTerms, wrapEnglishTerms } from "@/lib/bilingual";
+import { loadTtsCache, ttsCacheGet, ttsCacheSet } from "@/lib/tts-cache";
+import { sanitizeForSpeech } from "@/lib/voice";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const execFileAsync = promisify(execFile);
+
+// Uma única voz padrão em todo o projeto: edge-tts neural pt-BR FEMININA
+// (Francisca — tom maduro e natural, a mais próxima da dublagem brasileira
+// da Viúva Negra). O Piper Razo local pronuncia mal o R e o L ("carro" →
+// "caho") e a voz do navegador é robótica — removidos da fala do ARES: se o
+// edge falhar, ele fica sem som em vez de trocar para uma voz diferente.
+const DEFAULT_EDGE_VOICE = process.env.KIWI_TTS_VOICE || "pt-BR-FranciscaNeural";
+const FALLBACK_EDGE_VOICES = [
+  DEFAULT_EDGE_VOICE,
+  "pt-BR-ThalitaNeural",
+  "pt-BR-BrendaNeural",
+  "pt-BR-AntonioNeural",
+];
+
+// Vozes femininas e masculinas do edge-tts em português (para a seleção por gênero)
+const FEMALE_VOICES = ["pt-BR-FranciscaNeural", "pt-BR-ThalitaNeural", "pt-BR-BrendaNeural", "pt-PT-RaquelNeural"];
+const MALE_VOICES = ["pt-BR-AntonioNeural", "pt-PT-DuarteNeural"];
+
+// ────────────────────────────────────────────────
+// Cache de áudio: o mesmo texto (mesma voz/velocidade/tom) não é re-sintetizado.
+// Persistente em disco (lib/tts-cache): frases repetidas voltam instantâneas
+// mesmo depois de reiniciar o servidor/PC.
+// ────────────────────────────────────────────────
+
+function cacheKey(text: string, rate: number, pitch: number, voice: string): string {
+  return crypto.createHash("sha1").update([text, rate, pitch, voice].join("|")).digest("hex");
+}
+
+let cachedVoices: string[] | null = null;
+
+/**
+ * Candidatos a interpretador Python. Em máquinas de usuário o `python` pode
+ * ser o stub da Microsoft Store (não executa nada) ou nem existir — tenta os
+ * launchers do Windows (`py -3`) e nomes comuns até achar um que roda.
+ */
+function candidatosPython(): string[][] {
+  return [
+    ["python", "-m", "edge_tts"],
+    ["py", "-3", "-m", "edge_tts"],
+    ["python3", "-m", "edge_tts"],
+  ];
+}
+
+/** Roda o edge-tts no primeiro interpretador Python que funcionar. */
+async function execEdge(cmdBase: string[], args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
+  for (const cand of candidatosPython()) {
+    try {
+      const { stdout, stderr } = await execFileAsync(cand[0], [...cand.slice(1), ...args], {
+        timeout,
+        maxBuffer: 1024 * 1024 * 50,
+      });
+      return { stdout, stderr };
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      // Só tenta o próximo candidato se o executável não existir (ENOENT) ou
+      // for o stub da Store. Erro real do edge-tts (voz/arg) propaga.
+      const msg = `${err.message ?? ""}`.toLowerCase();
+      const ausente = err.code === "ENOENT" || /not recognized|não é reconhecido|invoked with the following|store/i.test(msg);
+      if (!ausente) throw e;
+    }
+  }
+  throw new Error("Nenhum interpretador Python disponível (instale Python em python.org).");
+}
+
+/** Lista as vozes disponíveis no edge-tts (faz cache). */
+async function listVoices(): Promise<string[]> {
+  if (cachedVoices) return cachedVoices;
+  try {
+    const { stdout } = await execEdge([], ["--list-voices"], 10000);
+    cachedVoices = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/)[0])
+      .filter((name) => /^[A-Za-z0-9-]+Neural$/.test(name));
+  } catch {
+    cachedVoices = [];
+  }
+  return cachedVoices;
+}
+
+/** Normaliza o parâmetro voice: "feminina"/"f"/nome da voz → nome da voz edge-tts. */
+async function resolveVoice(prefer: string | null): Promise<string | null> {
+  if (!prefer) return null;
+  const p = prefer.trim().toLowerCase();
+  if (p === "feminina" || p === "feminino" || p === "f" || p === "mulher") {
+    const voices = await listVoices();
+    return voices.find((v) => FEMALE_VOICES.includes(v)) ?? FEMALE_VOICES[0];
+  }
+  if (p === "masculina" || p === "masculino" || p === "m" || p === "homem") {
+    const voices = await listVoices();
+    return voices.find((v) => MALE_VOICES.includes(v)) ?? MALE_VOICES[0];
+  }
+  // Nome de voz direto (ex.: pt-BR-ThalitaNeural)
+  return /Neural$/i.test(p) ? prefer.trim() : null;
+}
+
+/** Escolhe a voz edge-tts: preferida (se pedida) ou a padrão do projeto. */
+async function pickEdgeVoice(prefer: string | null): Promise<string> {
+  const voices = await listVoices();
+  const all = prefer
+    ? [prefer, ...FALLBACK_EDGE_VOICES]
+    : [DEFAULT_EDGE_VOICE, ...FALLBACK_EDGE_VOICES];
+  return all.find((v) => voices.includes(v)) ?? all[0];
+}
+
+if (typeof window === "undefined" && process.env.NEXT_PHASE !== "phase-production-build") {
+  // Warm-up: resolve a lista de vozes e carrega o cache de áudio ANTES da
+  // primeira fala, então a síntese nunca atrasa no boot.
+  void listVoices();
+  void loadTtsCache().catch(() => {});
+}
+
+/** Sintetiza com o edge-tts (nuvem). */
+async function synthEdge(
+  text: string,
+  rate: number,
+  pitch: number,
+  voice: string,
+  outFile: string,
+): Promise<void> {
+  const rateArg =
+    rate !== 1 ? `--rate=${rate > 1 ? "+" : "-"}${Math.round(Math.abs(rate - 1) * 100)}%` : null;
+  const pitchArg = pitch !== 0 ? `--pitch=${pitch > 0 ? "+" : ""}${pitch}Hz` : null;
+  const args = ["--voice", voice, "--text", text, "--write-media", outFile];
+  if (rateArg) args.push(rateArg);
+  if (pitchArg) args.push(pitchArg);
+  const { stderr } = await execEdge([], args, 30000);
+  if (stderr && stderr.includes("ERROR")) throw new Error(stderr);
+}
+
+/**
+ * Auto-instala o edge-tts (dependência Python) quando ausente — máquinas de
+ * usuário se consertam sozinhas na primeira fala. Tenta pip no primeiro
+ * interpretador que existir (python / py -3 / python3).
+ */
+let edgeInstalacaoTentada = false;
+async function instalarEdgeTts(): Promise<boolean> {
+  if (edgeInstalacaoTentada) return false;
+  edgeInstalacaoTentada = true;
+  for (const cand of [
+    ["python", "-m", "pip", "install", "--user", "--quiet", "edge-tts"],
+    ["py", "-3", "-m", "pip", "install", "--user", "--quiet", "edge-tts"],
+    ["python3", "-m", "pip", "install", "--user", "--quiet", "edge-tts"],
+  ]) {
+    try {
+      await execFileAsync(cand[0], cand.slice(1), { timeout: 180_000 });
+      return true;
+    } catch {
+      /* tenta o próximo interpretador */
+    }
+  }
+  return false;
+}
+
+export async function GET(req: NextRequest) {
+  // Sanitização dupla (defesa extra além do cliente): o servidor NUNCA
+  // sintetiza "speak", "xml", "ssml", "lang" nem "ui" — mesmo que a chamada
+  // chegue crua (outro consumidor da API ou texto antigo no cache do cliente).
+  const raw = req.nextUrl.searchParams.get("text")?.trim() ?? "";
+  const text = sanitizeForSpeech(raw);
+  if (!text) {
+    return NextResponse.json({ error: "Falta o parâmetro text." }, { status: 400 });
+  }
+  if (text.length > 1200) {
+    return NextResponse.json({ error: "Texto muito longo para síntese de voz." }, { status: 400 });
+  }
+
+  const rateRaw = parseFloat(req.nextUrl.searchParams.get("rate") ?? "1");
+  const rate = Number.isFinite(rateRaw) && rateRaw > 0.25 ? rateRaw : 1;
+  const pitchRaw = parseFloat(req.nextUrl.searchParams.get("pitch") ?? "0");
+  const pitch = Number.isFinite(pitchRaw) ? Math.max(-20, Math.min(20, pitchRaw)) : 0;
+  const preferVoice = req.nextUrl.searchParams.get("voice")?.trim() || null;
+  const edgeVoice = await resolveVoice(preferVoice || "masculina");
+  const voiceName = await pickEdgeVoice(edgeVoice ?? preferVoice);
+  const label = edgeVoice ?? voiceName;
+
+  // Pronúncia bilíngue: o edge-tts aceita SSML com <lang xml:lang="en-US"> para
+  // falar termos em inglês no idioma original ("vou fazer um pull request" →
+  // "pull request" em inglês).
+  const hasEn = hasEnglishTerms(text);
+  const synthText = hasEn ? `<speak>${wrapEnglishTerms(text)}</speak>` : text;
+
+  // Cache: mesma fala (texto+voz+velocidade+tom) devolve o áudio na hora
+  // (memória da sessão + disco de sessões anteriores)
+  const key = cacheKey(synthText, rate, pitch, label ?? DEFAULT_EDGE_VOICE);
+  const cached = await ttsCacheGet(key);
+  if (cached) {
+    return new NextResponse(new Uint8Array(cached.data), {
+      headers: {
+        "Content-Type": cached.contentType,
+        "Cache-Control": "public, max-age=3600",
+        "X-TTS-Voice": cached.voice,
+      },
+    });
+  }
+
+  const tmp = path.join(os.tmpdir(), `ares-tts-${crypto.randomBytes(6).toString("hex")}.mp3`);
+  let data: Buffer;
+  try {
+    await synthEdge(synthText, rate, pitch, voiceName, tmp);
+    data = await fs.readFile(tmp);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Dependência Python ausente (edge_tts não instalado no PC do usuário):
+    // instala sozinho e tenta de novo UMA vez.
+    if (/No module named|ModuleNotFoundError/i.test(msg) && (await instalarEdgeTts())) {
+      try {
+        await synthEdge(synthText, rate, pitch, voiceName, tmp);
+        data = await fs.readFile(tmp);
+      } catch (err2) {
+        const msg2 = err2 instanceof Error ? err2.message : String(err2);
+        await fs.rm(tmp, { force: true }).catch(() => {});
+        return NextResponse.json({ error: `Não consegui gerar a voz neural: ${msg2}` }, { status: 500 });
+      }
+    } else {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      return NextResponse.json({ error: `Não consegui gerar a voz neural: ${msg}` }, { status: 500 });
+    }
+  }
+  await fs.rm(tmp, { force: true }).catch(() => {});
+
+  const voiceLabel = voiceName;
+  void ttsCacheSet(key, data, "audio/mpeg", voiceLabel);
+  return new NextResponse(new Uint8Array(data), {
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "public, max-age=3600",
+      "X-TTS-Voice": voiceLabel,
+    },
+  });
+}
