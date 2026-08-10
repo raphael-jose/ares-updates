@@ -1,11 +1,11 @@
 {
-  "versao": "20260810-190314",
+  "versao": "20260810-192651",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "Chat simplificado: adicionou o ID e conectou — sem verificação manual nem desbloqueio de identidade.",
-    "Status dos contatos agora vem da presença real (heartbeat a cada 30s) — o amigo não fica mais travado em \"offline\" estando online.",
-    "Criar identidade agora é só nome + tag (ex.: Raphael + 966 → RAPHAEL#966), sem senha."
+    "Status agora é 100% presença real do broker: amigo no broker = ONLINE, sempre. Acabou o \"conectando\" travado e o \"offline\" mentiroso.",
+    "Reconexão contínua automática: o app re-invita contatos online sem canal a cada 25s — convite perdido não trava mais a conversa.",
+    "Removida a caixa de aviso de NAT do chat (diagnóstico técnico fica no painel do desenvolvedor)."
   ],
   "arquivos": [
     {
@@ -140,8 +140,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/2e6a08d1c41a05688f70baa1515da032ff56a6397ae6f1516b6ae71bc8701b39",
-      "sha256": "2e6a08d1c41a05688f70baa1515da032ff56a6397ae6f1516b6ae71bc8701b39"
+      "url": "arquivos/fa672bbc97ac66d5f3dd8453519bf7628aa274bbad48b71d1ade668e5f2f0968",
+      "sha256": "fa672bbc97ac66d5f3dd8453519bf7628aa274bbad48b71d1ade668e5f2f0968"
     },
     {
       "caminho": "instrumentation.ts",
