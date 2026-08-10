@@ -1,10 +1,10 @@
 {
-  "versao": "20260810-172719",
+  "versao": "20260810-174400",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: correção da entrega de imagens/vídeos/áudios — o caminho de fragmentação (chunks) estava descartando as mensagens grandes em silêncio; agora elas chegam e são confirmadas",
-    "Chat P2P: presença corrigida — se um contato aparecer offline para você, reabra o chat (ele re-assina a presença e atualiza o status)"
+    "Chat P2P: envio de documentos pelo anexo (PDF, Word/Excel/PPT, texto, zip…) — o destinatário vê o card com o nome do arquivo e botão de baixar",
+    "Chat P2P: envio de vídeos pelo anexo confirmado — o caminho de fragmentação entrega vídeos grandes com player e confirmação de visualização"
   ],
   "arquivos": [
     {
@@ -109,8 +109,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/15044a3c8bb0686e93612f785439b8d67166a66c55c37d71ced4e5871ac92333",
-      "sha256": "15044a3c8bb0686e93612f785439b8d67166a66c55c37d71ced4e5871ac92333"
+      "url": "arquivos/af63ffa43d67654e375a643d0cc39902cada96f5536c2b93b44b76875751cc92",
+      "sha256": "af63ffa43d67654e375a643d0cc39902cada96f5536c2b93b44b76875751cc92"
     },
     {
       "caminho": "app/icon.svg",
@@ -139,8 +139,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/09b524ffd79d36f465827cbabcd3e557617fe123c309cfae79d14d8a9f2a98fa",
-      "sha256": "09b524ffd79d36f465827cbabcd3e557617fe123c309cfae79d14d8a9f2a98fa"
+      "url": "arquivos/8f5d43201cce92f1f1c705793272bcd75a12442cd1d80eeef65e9d01ab1514a9",
+      "sha256": "8f5d43201cce92f1f1c705793272bcd75a12442cd1d80eeef65e9d01ab1514a9"
     },
     {
       "caminho": "instrumentation.ts",
@@ -229,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/7bbf84afcd3180c4f9699a27f294828be35aa0712283e1419993a2dbdb217338",
-      "sha256": "7bbf84afcd3180c4f9699a27f294828be35aa0712283e1419993a2dbdb217338"
+      "url": "arquivos/d714840158afb488222b0ce17c1960e32e738419889ba5f3bccfd4c83cfd2979",
+      "sha256": "d714840158afb488222b0ce17c1960e32e738419889ba5f3bccfd4c83cfd2979"
     },
     {
       "caminho": "lib/agent/project.ts",
