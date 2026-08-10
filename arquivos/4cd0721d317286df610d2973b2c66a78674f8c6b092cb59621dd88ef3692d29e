@@ -1,0 +1,106 @@
+/**
+ * Teclas especiais do SendKeys (Windows) — módulo FOLHA, sem dependências.
+ * O builtin de voz importa daqui em vez de puxar o tools.ts (que usa fs/os/
+ * child_process e não pode entrar no bundle do cliente).
+ */
+
+/** Caracteres que o SendKeys interpreta como modificadores (precisam de chaves). */
+const SENDKEYS_SPECIAL = /[+^%~(){}[\]]/g;
+
+/** Escapa texto para o SendKeys: `+^%~(){}[]` viram `{+}` etc. Exportado para testes. */
+export function sendKeysEscape(text: string): string {
+  // Primeiro escapa os caracteres especiais; só depois troca quebras de linha
+  // pelo comando {ENTER} (que não pode ser re-escapado).
+  return text.replace(SENDKEYS_SPECIAL, (m) => `{${m}}`).replace(/\r?\n/g, "{ENTER}");
+}
+
+/** Texto 100% ASCII imprimível → vai direto pelo SendKeys (rápido). */
+export function isSimpleAscii(s: string): boolean {
+  return /^[\x20-\x7E]+$/.test(s);
+}
+
+/** Mapeia nomes comuns de teclas para a sintaxe do SendKeys. */
+const SPECIAL_KEYS: Record<string, string> = {
+  enter: "{ENTER}",
+  return: "{ENTER}",
+  "tecla enter": "{ENTER}",
+  tab: "{TAB}",
+  esc: "{ESC}",
+  escape: "{ESC}",
+  backspace: "{BACKSPACE}",
+  "back space": "{BACKSPACE}",
+  delete: "{DELETE}",
+  del: "{DELETE}",
+  suprimir: "{DELETE}",
+  home: "{HOME}",
+  end: "{END}",
+  insert: "{INSERT}",
+  "page up": "{PGUP}",
+  pageup: "{PGUP}",
+  "pagina acima": "{PGUP}",
+  "página acima": "{PGUP}",
+  "page down": "{PGDN}",
+  pagedown: "{PGDN}",
+  "pagina abaixo": "{PGDN}",
+  "página abaixo": "{PGDN}",
+  up: "{UP}",
+  "seta para cima": "{UP}",
+  "seta acima": "{UP}",
+  down: "{DOWN}",
+  "seta para baixo": "{DOWN}",
+  "seta abaixo": "{DOWN}",
+  left: "{LEFT}",
+  "seta para esquerda": "{LEFT}",
+  "seta esquerda": "{LEFT}",
+  right: "{RIGHT}",
+  "seta para direita": "{RIGHT}",
+  "seta direita": "{RIGHT}",
+  space: " ",
+  "espaco": " ",
+  "espaço": " ",
+  "barra de espaco": " ",
+  "barra de espaço": " ",
+  f1: "{F1}",
+  f2: "{F2}",
+  f3: "{F3}",
+  f4: "{F4}",
+  f5: "{F5}",
+  f6: "{F6}",
+  f7: "{F7}",
+  f8: "{F8}",
+  f9: "{F9}",
+  f10: "{F10}",
+  f11: "{F11}",
+  f12: "{F12}",
+  "ctrl a": "^a",
+  "ctrl+a": "^a",
+  "control a": "^a",
+  "ctrl c": "^c",
+  "ctrl+c": "^c",
+  "control c": "^c",
+  "ctrl v": "^v",
+  "ctrl+v": "^v",
+  "control v": "^v",
+  "ctrl x": "^x",
+  "ctrl+x": "^x",
+  "ctrl z": "^z",
+  "ctrl+z": "^z",
+  "ctrl s": "^s",
+  "ctrl+s": "^s",
+  "ctrl f": "^f",
+  "ctrl+f": "^f",
+  "ctrl t": "^t",
+  "ctrl+t": "^t",
+  "ctrl n": "^n",
+  "ctrl+n": "^n",
+  "ctrl w": "^w",
+  "ctrl+w": "^w",
+  "alt tab": "%{TAB}",
+  "alt+tab": "%{TAB}",
+};
+
+/** Converte um nome de tecla falado/digitado para a sintaxe do SendKeys. */
+export function parseSpecialKey(raw: string): string | null {
+  const n = (raw ?? "").toLowerCase().trim().replace(/\s+/g, " ");
+  return SPECIAL_KEYS[n] ?? null;
+}
