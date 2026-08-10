@@ -1,7 +1,10 @@
 {
-  "versao": "20260810-153847",
+  "versao": "20260810-154037",
   "npm": false,
-  "exigeReinicio": true,
+  "exigeReinicio": false,
+  "notas": [
+    "TESTE-NOTA-ABC123"
+  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
