@@ -1,0 +1,1079 @@
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import os from "os";
+import { resumoConfiguracoes } from "./settings";
+
+/**
+ * Memória permanente do ARES: salva em arquivo no disco (~/.ares/memory.json),
+ * então sobrevive a reinicializações do PC e do servidor.
+ */
+
+interface MemoryData {
+  usuario: Record<string, string>;
+  contatos: Record<string, string>;
+  fatos: string[];
+  tarefas: string[];
+  notas: string[];
+  /** O que o usuário ouviu no player de música (mais recente primeiro). */
+  historicoMusica: MusicHistoryEntry[];
+  /** Compromissos da agenda/calendário (mais próximos primeiro). */
+  agenda: AgendaEntry[];
+}
+
+/** Uma entrada do histórico de música: o que foi tocado e quando. */
+export interface MusicHistoryEntry {
+  /** Consulta tocada (ex.: "linkin park"). */
+  q: string;
+  /** Nº de faixas encontradas na busca (0 se desconhecido). */
+  faixas: number;
+  /** Timestamp (ms) em que tocou. */
+  quando: number;
+}
+
+/** Um compromisso da agenda/calendário do usuário. */
+export interface AgendaEntry {
+  /** Identificador único (usado para remover). */
+  id: string;
+  /** O que está marcado (ex.: "reunião com o time"). */
+  titulo: string;
+  /** Timestamp (ms) do início do compromisso. */
+  quando: number;
+  /** Texto amigável do horário (ex.: "amanhã às 15h"). */
+  quandoTexto: string;
+  /** Local, se mencionado (ex.: "escritório"). */
+  local?: string;
+  /** Recorrência: "toda sexta às 10h" repete a partir de `quando`. */
+  recorrencia?: { frequencia: "diaria" | "semanal" | "mensal" };
+}
+
+const MAX_MUSIC_HISTORY = 20;
+
+const MEMORY_DIR = path.join(os.homedir(), ".ares");
+const MEMORY_FILE = path.join(MEMORY_DIR, "memory.json");
+
+let cache: MemoryData | null = null;
+let writeQueue: Promise<void> = Promise.resolve();
+
+const norm = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+function ensureLoaded(): MemoryData {
+  if (cache) return cache;
+  try {
+    const raw = fs.readFileSync(MEMORY_FILE, "utf8");
+    const parsed = JSON.parse(raw) as Partial<MemoryData>;
+    cache = {
+      usuario:
+        parsed.usuario && typeof parsed.usuario === "object" ? parsed.usuario : {},
+      contatos:
+        parsed.contatos && typeof parsed.contatos === "object" ? parsed.contatos : {},
+      fatos: Array.isArray(parsed.fatos)
+        ? parsed.fatos.filter((f): f is string => typeof f === "string")
+        : [],
+      tarefas: Array.isArray(parsed.tarefas)
+        ? parsed.tarefas.filter((f): f is string => typeof f === "string")
+        : [],
+      notas: Array.isArray(parsed.notas)
+        ? parsed.notas.filter((f): f is string => typeof f === "string")
+        : [],
+      historicoMusica: Array.isArray(parsed.historicoMusica)
+        ? parsed.historicoMusica
+            .filter((e): e is MusicHistoryEntry => e && typeof e.q === "string")
+            .map((e) => ({
+              q: e.q,
+              faixas: Number.isFinite(e.faixas) ? e.faixas : 0,
+              quando: Number.isFinite(e.quando) ? e.quando : Date.now(),
+            }))
+        : [],
+      agenda: Array.isArray(parsed.agenda)
+        ? parsed.agenda
+            .filter((e): e is AgendaEntry => !!e && typeof e.titulo === "string")
+            .map((e) => ({
+              id: typeof e.id === "string" ? e.id : genAgendaId(),
+              titulo: e.titulo,
+              quando: Number.isFinite(e.quando) ? e.quando : Date.now(),
+              quandoTexto: typeof e.quandoTexto === "string" ? e.quandoTexto : "",
+              local: typeof e.local === "string" ? e.local : undefined,
+              recorrencia:
+                e.recorrencia &&
+                (e.recorrencia.frequencia === "diaria" ||
+                  e.recorrencia.frequencia === "semanal" ||
+                  e.recorrencia.frequencia === "mensal")
+                  ? { frequencia: e.recorrencia.frequencia }
+                  : undefined,
+            }))
+            .sort((a, b) => a.quando - b.quando)
+        : [],
+    };
+  } catch {
+    cache = {
+      usuario: {},
+      contatos: {},
+      fatos: [],
+      tarefas: [],
+      notas: [],
+      historicoMusica: [],
+      agenda: [],
+    };
+  }
+  return cache;
+}
+
+function scheduleSave(): void {
+  const data = cache ?? {
+    usuario: {},
+    contatos: {},
+    fatos: [],
+    tarefas: [],
+    notas: [],
+    historicoMusica: [],
+    agenda: [],
+  };
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(MEMORY_DIR, { recursive: true });
+      await fsp.writeFile(MEMORY_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch {
+      /* gravação falhou, mas a sessão continua com a memória em cache */
+    }
+  });
+}
+
+/** Limpa prefixos ("numero da", "contato:", "minha", ...) e devolve o nome do contato. */
+export function normalizeContactName(raw: string): string {
+  let s = (raw ?? "").trim();
+  s = s.replace(/^contato\s*:\s*/i, "");
+  s = s.replace(/^:\s*/, "");
+  s = s.replace(
+    /^(?:numero|número|telefone|whatsapp|zap|zap zap|contato)\s+(?:do|da|de|do meu|da minha)\s+/i,
+    "",
+  );
+  s = s.replace(/^(?:o|a|do|da|de|meu|minha|meus|minhas|do meu|da minha)\s+/i, "");
+  s = s.replace(/^(?:numero|número|telefone|whatsapp|zap|contato)\s*/i, "");
+  return s.trim().replace(/\s+/g, " ");
+}
+
+/** Salva uma informação na memória. A chave é opcional — o valor pode bastar. */
+export async function remember(
+  key: string,
+  value: string,
+): Promise<{ ok: boolean; message: string }> {
+  const k = (key ?? "").trim();
+  const v = (value ?? "").trim();
+  if (!v) return { ok: false, message: "Não recebi o que guardar." };
+
+  const data = ensureLoaded();
+  const kn = norm(k);
+
+  // Fato solto (chave "fato")
+  if (kn === "fato" || kn === "fatos") {
+    data.fatos.push(v);
+    scheduleSave();
+    return { ok: true, message: "Guardei na memória." };
+  }
+
+  // Contato explícito: "contato: mãe"
+  if (kn.startsWith("contato")) {
+    const name = normalizeContactName(k.slice("contato".length)) || "contato";
+    data.contatos[name] = v.replace(/\D/g, "") || v;
+    scheduleSave();
+    return { ok: true, message: `Guardei o contato ${name} na memória.` };
+  }
+
+  // Dado do usuário: "usuario: nome"
+  if (kn.startsWith("usuario")) {
+    const field = k
+      .slice("usuario".length)
+      .replace(/^:\s*/, "")
+      .trim()
+      .toLowerCase();
+    if (!field) {
+      data.fatos.push(v);
+      scheduleSave();
+      return { ok: true, message: "Guardei na memória." };
+    }
+    data.usuario[field] = v;
+    scheduleSave();
+    return { ok: true, message: `Guardei na memória: ${v}.` };
+  }
+
+  // Valor com número grande → contato
+  const digits = v.replace(/\D/g, "");
+  if (digits.length >= 8) {
+    const name = normalizeContactName(k) || "contato";
+    data.contatos[name] = digits;
+    scheduleSave();
+    return { ok: true, message: `Guardei o contato ${name} na memória.` };
+  }
+
+  // Fato geral
+  data.fatos.push(`${k ? `${k}: ` : ""}${v}`);
+  scheduleSave();
+  return { ok: true, message: "Guardei na memória." };
+}
+
+/** Apaga da memória a primeira informação que bater com a chave/termo. */
+export async function forget(
+  key: string,
+): Promise<{ ok: boolean; message: string }> {
+  const k = (key ?? "").trim();
+  if (!k) return { ok: false, message: "Diga o que devo esquecer." };
+
+  const data = ensureLoaded();
+  const kn = norm(k);
+
+  for (const field of Object.keys(data.usuario)) {
+    const fn = norm(field);
+    if (fn && (kn.includes(fn) || fn.includes(kn))) {
+      delete data.usuario[field];
+      scheduleSave();
+      return { ok: true, message: `Esqueci ${k}.` };
+    }
+  }
+  for (const name of Object.keys(data.contatos)) {
+    const nn = norm(name);
+    if (nn && (kn.includes(nn) || nn.includes(kn))) {
+      delete data.contatos[name];
+      scheduleSave();
+      return { ok: true, message: `Esqueci o contato ${name}.` };
+    }
+  }
+  const idx = data.fatos.findIndex(
+    (f) => norm(f).includes(kn) || kn.includes(norm(f)),
+  );
+  if (idx >= 0) {
+    data.fatos.splice(idx, 1);
+    scheduleSave();
+    return { ok: true, message: `Esqueci ${k}.` };
+  }
+  return { ok: false, message: `Não encontrei nada sobre "${k}" na memória.` };
+}
+
+/** Procura o número de um contato pelo nome (com e sem acentos). */
+export function findContactSync(name: string): string | null {
+  const data = ensureLoaded();
+  const nn = norm(name);
+  if (!nn) return null;
+  const direct = Object.keys(data.contatos).find((n) => norm(n) === nn);
+  if (direct) return data.contatos[direct];
+  const partial = Object.keys(data.contatos).find(
+    (n) => nn.includes(norm(n)) || norm(n).includes(nn),
+  );
+  return partial ? data.contatos[partial] : null;
+}
+
+/** Nome do usuário salvo na memória. */
+export function getUserName(): string {
+  const data = ensureLoaded();
+  return (data.usuario.nome ?? "").trim();
+}
+
+/** Texto da memória para injetar no prompt do LLM. Vazio se não houver nada. */
+export function getMemoryContext(): string {
+  const data = ensureLoaded();
+  const lines: string[] = [];
+  if (data.usuario.nome) lines.push(`Nome do usuário: ${data.usuario.nome}`);
+  for (const [k, v] of Object.entries(data.usuario)) {
+    if (k !== "nome") lines.push(`${k}: ${v}`);
+  }
+  for (const [name, num] of Object.entries(data.contatos)) {
+    lines.push(`Contato ${name}: ${num}`);
+  }
+  for (const f of data.fatos) lines.push(`Fato: ${f}`);
+  if (data.tarefas.length) lines.push(`Tarefas pendentes: ${data.tarefas.join("; ")}`);
+  if (data.notas.length) lines.push(`Notas do usuário: ${data.notas.join(" | ")}`);
+  const proximosAgenda = proximosCompromissos(data.agenda, 5);
+  if (proximosAgenda.length) {
+    lines.push(
+      `Próximos compromissos da agenda: ${proximosAgenda
+        .map((e) => `${e.titulo} (${e.quandoTexto})${e.local ? `, ${e.local}` : ""}`)
+        .join("; ")}`,
+    );
+  }
+  if (data.historicoMusica.length) {
+    const mus = data.historicoMusica
+      .slice(0, 8)
+      .map((e) => (e.faixas > 0 ? `${e.q} (${e.faixas} faixas)` : e.q))
+      .join("; ");
+    lines.push(`Música que o usuário ouviu no player (mais recente primeiro): ${mus}`);
+  }
+  // Configurações atuais do app (o menu CONFIGURAÇÕES persiste em settings.json)
+  // — a IA consulta a memória para responder sobre as configurações.
+  try {
+    lines.push(`Configurações do app:\n${resumoConfiguracoes()}`);
+  } catch {
+    /* sem configurações — segue */
+  }
+  return lines.join("\n");
+}
+
+/** Texto amigável (para falar) com tudo o que o ARES lembra. */
+export function listMemoryText(): string {
+  const data = ensureLoaded();
+  const parts: string[] = [];
+  if (data.usuario.nome) parts.push(`Seu nome é ${data.usuario.nome}`);
+  for (const [k, v] of Object.entries(data.usuario)) {
+    if (k !== "nome") parts.push(`${k}: ${v}`);
+  }
+  for (const [name, num] of Object.entries(data.contatos)) {
+    parts.push(`${name}: ${num}`);
+  }
+  for (const f of data.fatos) parts.push(f);
+  if (data.tarefas.length) {
+    parts.push(
+      `Suas tarefas: ${data.tarefas.map((t, i) => `${i + 1}. ${t}`).join("; ")}`,
+    );
+  }
+  if (data.notas.length) {
+    parts.push(`Suas anotações: ${data.notas.map((n, i) => `${i + 1}. ${n}`).join("; ")}`);
+  }
+  const proximosAgenda = proximosCompromissos(data.agenda, 5);
+  if (proximosAgenda.length) {
+    parts.push(
+      `Sua agenda: ${proximosAgenda
+        .map((e) => `${e.titulo} ${e.quandoTexto}${e.local ? ` no ${e.local}` : ""}`)
+        .join("; ")}`,
+    );
+  }
+  if (data.historicoMusica.length) {
+    parts.push(
+      `O que você ouviu no player: ${data.historicoMusica
+        .slice(0, 8)
+        .map((e) => e.q)
+        .join("; ")}`,
+    );
+  }
+  return parts.length
+    ? parts.join(". ")
+    : "Minha memória está vazia. Me conte algo sobre você que eu guardo.";
+}
+
+/** Adiciona uma tarefa à lista de tarefas do usuário (persistente). */
+export async function addTask(
+  texto: string,
+): Promise<{ ok: boolean; message: string }> {
+  const task = (texto ?? "").trim().replace(/[.,;!?]+$/, "");
+  if (!task) return { ok: false, message: "Fale qual é a tarefa que devo anotar." };
+  const data = ensureLoaded();
+  if (data.tarefas.includes(task)) {
+    return { ok: true, message: `Já tenho essa tarefa anotada: ${task}.` };
+  }
+  data.tarefas.push(task);
+  scheduleSave();
+  const n = data.tarefas.length;
+  return {
+    ok: true,
+    message: `Anotado na sua lista de tarefas. Você tem ${n} tarefa${n === 1 ? "" : "s"} na lista.`,
+  };
+}
+
+/** Remove uma tarefa pela correspondência do texto (parcial tolerada). */
+export async function removeTask(
+  filtro: string,
+): Promise<{ ok: boolean; message: string }> {
+  const f = norm(filtro);
+  if (!f) return { ok: false, message: "Diga qual tarefa devo remover." };
+  const data = ensureLoaded();
+  const idx = data.tarefas.findIndex(
+    (t) => norm(t) === f || norm(t).includes(f) || f.includes(norm(t)),
+  );
+  if (idx < 0) {
+    return { ok: false, message: `Não encontrei a tarefa "${filtro}" na sua lista.` };
+  }
+  const removed = data.tarefas.splice(idx, 1)[0];
+  scheduleSave();
+  return { ok: true, message: `Removi a tarefa: ${removed}.` };
+}
+
+/** Lista as tarefas atuais (vazio → nenhuma). */
+export function listTasks(): string[] {
+  return [...ensureLoaded().tarefas];
+}
+
+// ────────────────────────────────────────────────────────────────
+// AGENDA / CALENDÁRIO
+// Compromissos com data e hora (a lista de tarefas continua existindo;
+// a agenda é para coisas marcadas num dia/horário).
+// ────────────────────────────────────────────────────────────────
+
+/** Nomes dos meses (normalizado, sem acentos) → mês (0-11). */
+const MESES: Record<string, number> = {
+  janeiro: 0,
+  fevereiro: 1,
+  marco: 2,
+  abril: 3,
+  maio: 4,
+  junho: 5,
+  julho: 6,
+  agosto: 7,
+  setembro: 8,
+  outubro: 9,
+  novembro: 10,
+  dezembro: 11,
+};
+
+/** Dia da semana (normalizado) → 0-6 (0 = domingo). */
+const DIAS_SEMANA: Record<string, number> = {
+  domingo: 0,
+  segunda: 1,
+  terca: 2,
+  quarta: 3,
+  quinta: 4,
+  sexta: 5,
+  sabado: 6,
+};
+
+const AGENDA_MAX = 120;
+
+function genAgendaId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function addDays(d: Date, n: number): Date {
+  const out = new Date(d);
+  out.setDate(out.getDate() + n);
+  return out;
+}
+
+function startOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/** Formata o timestamp para fala (ex.: "sexta-feira, 8 de agosto às 15:00"). */
+export function formatQuando(ts: number): string {
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(ts));
+}
+
+/**
+ * Reconstrói um trecho (normalizado, sem acentos) com as palavras, caixa e
+ * acentos do texto original — usado para o título não perder "reunião"→"reuniao".
+ */
+function rebuildOriginal(original: string, normalized: string, piece: string): string {
+  const toksN = normalized.split(/\s+/).filter(Boolean);
+  const toksO = original.trim().split(/\s+/).filter(Boolean);
+  const pieceToks = piece.split(/\s+/).filter(Boolean);
+  if (!pieceToks.length) return "";
+  const kept: string[] = [];
+  let j = 0;
+  for (let i = 0; i < toksN.length && j < pieceToks.length; i++) {
+    if (toksN[i] === pieceToks[j]) {
+      kept.push(toksO[i] ?? pieceToks[j]);
+      j++;
+    }
+  }
+  return kept.join(" ");
+}
+
+/** Formata o timestamp curto para o painel (ex.: "sex., 08/08 às 15:00"). */
+export function formatQuandoCurto(ts: number): string {
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(ts));
+}
+
+/** Texto falado da recorrência (ex.: "toda sexta-feira às 10h", "todos os dias às 8h"). */
+function formatRecorrenciaTexto(
+  rec: { frequencia: "diaria" | "semanal" | "mensal" },
+  d: Date,
+): string {
+  const hm = `${d.getHours()}h${d.getMinutes() ? String(d.getMinutes()).padStart(2, "0") : ""}`;
+  if (rec.frequencia === "diaria") return `todos os dias às ${hm}`;
+  if (rec.frequencia === "semanal") {
+    const nomes = [
+      "domingo",
+      "segunda-feira",
+      "terça-feira",
+      "quarta-feira",
+      "quinta-feira",
+      "sexta-feira",
+      "sábado",
+    ];
+    return `toda ${nomes[d.getDay()] ?? "semana"} às ${hm}`;
+  }
+  return `todo dia ${d.getDate()} às ${hm}`;
+}
+
+/**
+ * Todas as ocorrências de um compromisso dentro de [from, to]. Compromissos
+ * comuns devolvem a própria data (se estiver no intervalo); recorrentes
+ * devolvem cada repetição (diária/semanal/mensal) que cair no intervalo.
+ * Exportado para o calendário do HUD pintar todos os dias da série.
+ */
+export function ocorrenciasEntre(
+  e: Pick<AgendaEntry, "quando" | "recorrencia">,
+  from: number,
+  to: number,
+): number[] {
+  if (!e.recorrencia) return e.quando >= from && e.quando <= to ? [e.quando] : [];
+  const freq = e.recorrencia.frequencia;
+  const base = new Date(e.quando);
+  const diaBase = base.getDate();
+  const passo = (d: Date) => {
+    if (freq === "diaria") d.setDate(d.getDate() + 1);
+    else if (freq === "semanal") d.setDate(d.getDate() + 7);
+    else {
+      // Mensal: mantém o dia do mês (com ajuste para meses mais curtos)
+      d.setDate(1);
+      d.setMonth(d.getMonth() + 1);
+      const ultimo = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(diaBase, ultimo));
+    }
+  };
+  const cur = new Date(base);
+  let guarda = 0;
+  while (cur.getTime() < from && guarda < 3000) {
+    passo(cur);
+    guarda++;
+  }
+  const out: number[] = [];
+  guarda = 0;
+  while (cur.getTime() <= to && guarda < 5000) {
+    out.push(cur.getTime());
+    passo(cur);
+    guarda++;
+  }
+  return out;
+}
+
+/**
+ * Interpreta a data/hora em português de uma frase e devolve o título + quando.
+ * Entende: hoje/amanhã/depois de amanhã, dia da semana ("sexta"), "dia 15",
+ * "15 de agosto", "20/12", "às 15h", "15h30", "meio dia", "da manhã/tarde/
+ * noite" e "próxima semana". Devolve null se não houver data nem hora.
+ */
+export function parseAgendaText(
+  raw: string,
+): {
+  titulo: string;
+  quando: Date;
+  quandoTexto: string;
+  local?: string;
+  recorrencia?: { frequencia: "diaria" | "semanal" | "mensal" };
+} | null {
+  const original = (raw ?? "").trim();
+  if (!original) return null;
+  const n = original.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  let work = ` ${n} `;
+
+  // "Come" os pedaços reconhecidos (data/hora) e guarda o que sobra (título)
+  const eat = (re: RegExp): RegExpMatchArray | null => {
+    const m = work.match(re);
+    if (m) work = work.replace(re, " ");
+    return m;
+  };
+
+  const hoje = startOfDay(new Date());
+  let quando: Date | null = null;
+  let hora: number | null = null;
+  let minuto = 0;
+  let recorrencia: { frequencia: "diaria" | "semanal" | "mensal" } | undefined;
+
+  // ——— Hora ———
+  if (eat(/\bmeio dia\b/)) hora = 12;
+  else if (eat(/\bmeia noite\b/)) hora = 0;
+  else {
+    const hm = eat(/(?:as|aos|ate|por volta de)\s*(\d{1,2})\s*(?:h\s*(\d{2})?|:\s*(\d{2})|\s*horas?)/);
+    if (hm) {
+      hora = parseInt(hm[1], 10);
+      minuto = hm[2] ? parseInt(hm[2], 10) : hm[3] ? parseInt(hm[3], 10) : 0;
+    } else {
+      const bare = eat(/(\d{1,2})\s*[h:]\s*(\d{2})/);
+      if (bare) {
+        hora = parseInt(bare[1], 10);
+        minuto = parseInt(bare[2], 10);
+      } else {
+        const horas = eat(/(\d{1,2})\s*horas?/);
+        if (horas) hora = parseInt(horas[1], 10);
+      }
+    }
+  }
+  const tarde = eat(/\bda tarde\b/);
+  const noite = eat(/\bda noite\b/);
+  if (hora !== null && hora < 12 && noite) hora += 12;
+  else if (hora !== null && hora < 12 && tarde) hora += 12;
+
+  // ——— Recorrência (consumida ANTES do dia para não vazar no título) ———
+  const recDia = eat(/\btodo\s+dia\s+(\d{1,2})\b/);
+  if (recDia) {
+    // "todo dia 15" = mensal no dia 15
+    recorrencia = { frequencia: "mensal" };
+    const d = parseInt(recDia[1], 10);
+    let q = new Date(hoje.getFullYear(), hoje.getMonth(), d);
+    if (q.getTime() < hoje.getTime()) q = new Date(hoje.getFullYear(), hoje.getMonth() + 1, d);
+    quando = q;
+  }
+  if (!quando) {
+    // "toda sexta" / "todas as sextas" = semanal no dia da semana
+    const recSem = eat(
+      /\btoda\s*(?:as\s+)?(domingo|segunda|terca|quarta|quinta|sexta|sabado)(?:[- ]feira)?s?\b/,
+    );
+    if (recSem) {
+      recorrencia = { frequencia: "semanal" };
+      const target = DIAS_SEMANA[recSem[1] ?? "sexta"] ?? 5;
+      let diff = (target - hoje.getDay() + 7) % 7;
+      if (diff === 0) diff = 7;
+      quando = addDays(hoje, diff);
+    }
+  }
+  if (!quando && eat(/\btodos os dias\b|\btodo dia\b|\bdiariamente\b/)) {
+    recorrencia = { frequencia: "diaria" };
+    quando = new Date(hoje);
+  }
+  if (!quando && eat(/\btoda semana\b|\bsemanalmente\b/)) {
+    recorrencia = { frequencia: "semanal" };
+  }
+  if (!quando && eat(/\btodo mes\b|\btodos os meses\b|\bmensalmente\b/)) {
+    recorrencia = { frequencia: "mensal" };
+  }
+
+  // ——— Dia ———
+  if (eat(/\bdepois de amanha\b/)) quando = addDays(hoje, 2);
+  else if (eat(/\bamanha\b/)) quando = addDays(hoje, 1);
+  else if (eat(/\bhoje\b/)) quando = new Date(hoje);
+  if (!quando && eat(/\bproxima semana\b/)) quando = addDays(hoje, 7);
+  if (!quando) {
+    const diaSem = eat(
+      /\b(?:proxima|proximo|na|nesta|nessa|essa)?\s*(domingo|segunda|terca|quarta|quinta|sexta|sabado)\s*(?:[- ]feira)?\b/,
+    );
+    if (diaSem) {
+      const target = DIAS_SEMANA[diaSem[1] ?? "sexta"] ?? 5;
+      let diff = (target - hoje.getDay() + 7) % 7;
+      if (diff === 0) diff = 7; // "sexta" dita numa sexta = a próxima
+      quando = addDays(hoje, diff);
+    }
+  }
+  if (!quando) {
+    // "dia 15 de agosto" / "15 de agosto" — mês vem antes do "dia N" puro
+    const diaMes = eat(
+      /(?:dia\s+)?(\d{1,2})\s+de\s+(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)/,
+    );
+    if (diaMes) {
+      const d = parseInt(diaMes[1], 10);
+      const mes = MESES[diaMes[2] ?? ""] ?? hoje.getMonth();
+      let q = new Date(hoje.getFullYear(), mes, d);
+      if (q.getTime() < hoje.getTime()) q = new Date(hoje.getFullYear() + 1, mes, d);
+      quando = q;
+    }
+  }
+  if (!quando) {
+    const diaNum = eat(/\bdia\s+(\d{1,2})\b/);
+    if (diaNum) {
+      const d = parseInt(diaNum[1], 10);
+      quando = new Date(hoje.getFullYear(), hoje.getMonth(), d);
+      if (quando.getTime() < hoje.getTime()) {
+        quando = new Date(hoje.getFullYear(), hoje.getMonth() + 1, d);
+      }
+    }
+  }
+  if (!quando) {
+    const dataNum = eat(/(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?/);
+    if (dataNum) {
+      const d = parseInt(dataNum[1], 10);
+      const m = parseInt(dataNum[2], 10);
+      let ano = dataNum[3] ? parseInt(dataNum[3], 10) : hoje.getFullYear();
+      if (dataNum[3] && ano < 100) ano += 2000;
+      let q = new Date(ano, m - 1, d);
+      if (!dataNum[3] && q.getTime() < hoje.getTime()) q = new Date(ano + 1, m - 1, d);
+      quando = q;
+    }
+  }
+
+  // Precisa de pelo menos hora ou dia para virar compromisso
+  if (!quando && hora === null) return null;
+  if (quando === null) quando = new Date(hoje);
+  const inicio = new Date(quando);
+  if (hora !== null) inicio.setHours(hora % 24, minuto, 0, 0);
+
+  // ——— Título: o que sobra depois de remover data/hora ———
+  let resto = work
+    .replace(/\s{2,}/g, " ")
+    .replace(/(?:^|\s)(?:na minha agenda|na agenda|no calendario|do calendario|agendado|marcado)(?:\s|$)/g, " ")
+    .trim();
+  // Remove verbos de comando e conectivos soltos que sobraram no início
+  const verbos =
+    /^(?:marca|marque|marcar|agenda|agende|agendar|anota|anote|adiciona|adicionar|coloca|coloque|guarda|guardar|lembrete|lembra|lembre|compromisso|compromissos|para|pra|pro|para o|para a|uma|um|a|o|me|minha|de|da|do|as|aos|ao|em|no|na)(?:\s+|$)/gi;
+  let prev = "";
+  while (resto !== prev) {
+    prev = resto;
+    resto = resto.replace(verbos, "").trim();
+  }
+  resto = resto.replace(/^(?:na|no|em)\s+/i, "").trim();
+  // Conectores que sobraram no FIM (ex.: "almoço ao" depois de "ao meio dia";
+  // nunca no meio: "café da manhã" mantém o "da")
+  const conectorFim = /(?:^|\s)(?:ao|as|aos|a|o|para|pra|pro|em|no|na|de|da|do|para o|para a)\s*$/gi;
+  prev = "";
+  while (resto !== prev) {
+    prev = resto;
+    resto = resto.replace(conectorFim, " ").replace(/\s{2,}/g, " ").trim();
+  }
+
+  // Reconstrói o título com acentos e maiúsculas originais (o trabalho acima
+  // foi todo feito no texto normalizado)
+  let titulo = rebuildOriginal(original, n, resto).replace(/[.,;!?]+$/, "").trim();
+
+  // ——— Local: "reunião no escritório" → título "reunião", local "escritório" ———
+  let local: string | undefined;
+  const locM = titulo.match(/\s(?:em|no|na)\s+([^,;]+?)\s*$/i);
+  if (locM && locM[1].trim().split(" ").length <= 4) {
+    local = locM[1].trim();
+    titulo = titulo.replace(/\s+(?:em|no|na)\s+[^,;]+?$/, "").trim();
+  }
+
+  if (!titulo) {
+    // Sem título explícito, mas a frase cita "compromisso" (ex.: "compromisso 20/12 às 14h")
+    if (!/\bcompromisso\b/.test(n)) return null;
+    titulo = "Compromisso";
+  }
+  if (titulo.length > 120) return null;
+
+  return {
+    titulo,
+    quando: inicio,
+    quandoTexto: recorrencia
+      ? formatRecorrenciaTexto(recorrencia, inicio)
+      : formatQuando(inicio.getTime()),
+    ...(local ? { local } : {}),
+    ...(recorrencia ? { recorrencia } : {}),
+  };
+}
+
+/** Marca um compromisso na agenda (interpreta data/hora em português). */
+export async function addAgenda(
+  texto: string,
+): Promise<{ ok: boolean; message: string }> {
+  const parsed = parseAgendaText(texto);
+  if (!parsed) {
+    return {
+      ok: false,
+      message:
+        "Me diga quando é o compromisso — por exemplo: marca reunião amanhã às 15h, ou agenda consulta sexta-feira às 10h.",
+    };
+  }
+  const data = ensureLoaded();
+  // Mesmo título na mesma meia hora não duplica
+  const dup = data.agenda.find(
+    (e) =>
+      norm(e.titulo) === norm(parsed.titulo) &&
+      (e.recorrencia?.frequencia ?? null) === (parsed.recorrencia?.frequencia ?? null) &&
+      Math.abs(e.quando - parsed.quando.getTime()) < 30 * 60 * 1000,
+  );
+  if (dup) {
+    return {
+      ok: true,
+      message: `Já tenho ${parsed.titulo} marcado na agenda para ${dup.quandoTexto}.`,
+    };
+  }
+  data.agenda.push({
+    id: genAgendaId(),
+    titulo: parsed.titulo,
+    quando: parsed.quando.getTime(),
+    quandoTexto: parsed.quandoTexto,
+    ...(parsed.local ? { local: parsed.local } : {}),
+    ...(parsed.recorrencia ? { recorrencia: parsed.recorrencia } : {}),
+  });
+  data.agenda.sort((a, b) => a.quando - b.quando);
+  if (data.agenda.length > AGENDA_MAX) data.agenda.length = AGENDA_MAX;
+  scheduleSave();
+  return {
+    ok: true,
+    message: `Marquei na agenda: ${parsed.titulo}${parsed.local ? ` no ${parsed.local}` : ""} para ${parsed.quandoTexto}.`,
+  };
+}
+
+/** Remove um compromisso pelo id, número (ex.: #2) ou parte do título. */
+export async function removeAgenda(
+  filtro: string,
+): Promise<{ ok: boolean; message: string }> {
+  const f = norm(filtro);
+  if (!f) return { ok: false, message: "Diga qual compromisso devo remover." };
+  const data = ensureLoaded();
+  const numM = f.match(/^#?(\d+)$/);
+  if (numM) {
+    const idx = parseInt(numM[1], 10) - 1;
+    if (idx >= 0 && idx < data.agenda.length) {
+      const removed = data.agenda.splice(idx, 1)[0];
+      scheduleSave();
+      return {
+        ok: true,
+        message: `Removi da agenda: ${removed.titulo} (${removed.quandoTexto}).`,
+      };
+    }
+    return { ok: false, message: "Não encontrei esse número na agenda." };
+  }
+  const idx = data.agenda.findIndex(
+    (e) =>
+      norm(e.id) === f ||
+      norm(e.titulo) === f ||
+      norm(e.titulo).includes(f) ||
+      f.includes(norm(e.titulo)),
+  );
+  if (idx < 0) return { ok: false, message: `Não encontrei "${filtro}" na agenda.` };
+  const removed = data.agenda.splice(idx, 1)[0];
+  scheduleSave();
+  return { ok: true, message: `Removi da agenda: ${removed.titulo} (${removed.quandoTexto}).` };
+}
+
+/** Os próximos compromissos (a partir de agora), até n. */
+export function proximosCompromissos(entries: AgendaEntry[], n = 5): AgendaEntry[] {
+  const agora = Date.now();
+  const fim = agora + 7 * 24 * 3600 * 1000;
+  return entries
+    .filter((e) => {
+      if (e.quando >= agora - 60 * 60 * 1000) return true;
+      // Recorrente antigo ainda entra se tiver ocorrência nesta semana
+      return !!e.recorrencia && ocorrenciasEntre(e, agora, fim).length > 0;
+    })
+    .slice(0, n);
+}
+
+/**
+ * Lista os compromissos da agenda. Filtro opcional: "hoje", "amanha",
+ * "semana", um dia da semana ou uma data (ex.: "sexta", "20/12"). Vazio = todos.
+ */
+export function listAgenda(filtro?: string): AgendaEntry[] {
+  const data = ensureLoaded();
+  const f = norm(filtro ?? "");
+  if (!f) return [...data.agenda];
+  // True se o compromisso (ou alguma ocorrência da série recorrente) cair no dia
+  const caiNoDia = (e: AgendaEntry, inicio: Date, fim: Date) =>
+    ocorrenciasEntre(e, inicio.getTime(), fim.getTime() - 1).length > 0;
+  if (f === "hoje") {
+    const inicio = startOfDay(new Date());
+    const fim = addDays(inicio, 1);
+    return data.agenda.filter((e) => caiNoDia(e, inicio, fim));
+  }
+  if (f === "amanha") {
+    const inicio = addDays(startOfDay(new Date()), 1);
+    const fim = addDays(inicio, 1);
+    return data.agenda.filter((e) => caiNoDia(e, inicio, fim));
+  }
+  if (/semana|proximos|proximas|proximo|proxima/.test(f)) {
+    const inicio = startOfDay(new Date());
+    const fim = addDays(inicio, 7);
+    return data.agenda.filter((e) => caiNoDia(e, inicio, fim));
+  }
+  const parsed = parseAgendaText(f);
+  if (parsed) {
+    const inicio = startOfDay(parsed.quando);
+    const fim = addDays(inicio, 1);
+    return data.agenda.filter((e) => caiNoDia(e, inicio, fim));
+  }
+  return [...data.agenda];
+}
+
+/** Mensagem falada com os compromissos (filtro opcional igual ao do listAgenda). */
+export function agendaListMessage(filtro?: string): { ok: boolean; message: string } {
+  const entries = listAgenda(filtro);
+  const f = norm(filtro ?? "");
+  const quando = f ? ` para ${filtro}` : "";
+  if (!entries.length) {
+    return {
+      ok: true,
+      message: `Sua agenda está vazia${quando}. Fale, por exemplo: marca reunião amanhã às 15h.`,
+    };
+  }
+  const lines = entries.map(
+    (e, i) =>
+      `${i + 1}. ${e.titulo} — ${e.quandoTexto}${e.local ? ` (${e.local})` : ""}`,
+  );
+  return { ok: true, message: `Sua agenda (${entries.length}):\n${lines.join("\n")}` };
+}
+
+/** Adiciona uma anotação (texto mais longo que uma tarefa/fato). */
+export async function addNote(
+  texto: string,
+): Promise<{ ok: boolean; message: string }> {
+  const nota = (texto ?? "").trim().replace(/[.,;!?]+$/, "");
+  if (!nota) return { ok: false, message: "Fale o que devo anotar." };
+  const data = ensureLoaded();
+  if (data.notas.includes(nota)) {
+    return { ok: true, message: "Já tenho essa anotação." };
+  }
+  data.notas.push(nota);
+  scheduleSave();
+  const n = data.notas.length;
+  return {
+    ok: true,
+    message: `Anotado. Você tem ${n} anotaç${n === 1 ? "ão" : "ões"} salva${n === 1 ? "" : "s"}.`,
+  };
+}
+
+/** Remove uma anotação pela correspondência (parcial tolerada). */
+export async function removeNote(
+  filtro: string,
+): Promise<{ ok: boolean; message: string }> {
+  const f = norm(filtro);
+  if (!f) return { ok: false, message: "Diga qual anotação devo apagar." };
+  const data = ensureLoaded();
+  const idx = data.notas.findIndex(
+    (n) => norm(n) === f || norm(n).includes(f) || f.includes(norm(n)),
+  );
+  if (idx < 0) {
+    return { ok: false, message: `Não encontrei a anotação "${filtro}".` };
+  }
+  const removed = data.notas.splice(idx, 1)[0];
+  scheduleSave();
+  return { ok: true, message: `Apaguei a anotação: ${removed}.` };
+}
+
+/** Lista as anotações atuais (vazio → nenhuma). */
+export function listNotes(): string[] {
+  return [...ensureLoaded().notas];
+}
+
+/** Estrutura completa da memória (para o painel editável do HUD). */
+export interface MemorySnapshot {
+  usuario: Record<string, string>;
+  contatos: Record<string, string>;
+  fatos: string[];
+  tarefas: string[];
+  notas: string[];
+  historicoMusica: MusicHistoryEntry[];
+  agenda: AgendaEntry[];
+}
+
+export type MemorySection = keyof MemorySnapshot;
+
+/** Devolve uma cópia completa da memória (usado na rota /api/memory). */
+export function getMemorySnapshot(): MemorySnapshot {
+  const data = ensureLoaded();
+  return {
+    usuario: { ...data.usuario },
+    contatos: { ...data.contatos },
+    fatos: [...data.fatos],
+    tarefas: [...data.tarefas],
+    notas: [...data.notas],
+    historicoMusica: [...data.historicoMusica],
+    agenda: [...data.agenda],
+  };
+}
+
+/** Registra no histórico o que o usuário tocou no player de música. */
+export async function addMusicHistory(
+  q: string,
+  faixas = 0,
+): Promise<{ ok: boolean; message: string }> {
+  const consulta = (q ?? "").trim();
+  if (!consulta) return { ok: false, message: "Busca vazia." };
+  const data = ensureLoaded();
+  // Move para o topo se já existe (re-ouvir não duplica); senão adiciona
+  const idx = data.historicoMusica.findIndex((e) => norm(e.q) === norm(consulta));
+  if (idx >= 0) data.historicoMusica.splice(idx, 1);
+  data.historicoMusica.unshift({ q: consulta, faixas, quando: Date.now() });
+  if (data.historicoMusica.length > MAX_MUSIC_HISTORY) {
+    data.historicoMusica.length = MAX_MUSIC_HISTORY;
+  }
+  scheduleSave();
+  return { ok: true, message: `Guardei o que você ouviu: ${consulta}.` };
+}
+
+/** Adiciona/atualiza um item na memória por seção (painel do HUD). */
+export async function memoryAdd(
+  section: MemorySection,
+  key: string,
+  value: string,
+): Promise<{ ok: boolean; message: string }> {
+  const k = (key ?? "").trim();
+  const v = (value ?? "").trim();
+  if (!v) return { ok: false, message: "Valor vazio." };
+  const data = ensureLoaded();
+  switch (section) {
+    case "usuario":
+      if (!k) return { ok: false, message: "Falta a chave (ex.: nome, cidade)." };
+      data.usuario[k] = v;
+      break;
+    case "contatos":
+      if (!k) return { ok: false, message: "Falta o nome do contato." };
+      data.contatos[normalizeContactName(k)] = v.replace(/\D/g, "") || v;
+      break;
+    case "fatos":
+      data.fatos.push(v);
+      break;
+    case "tarefas":
+      data.tarefas.push(v);
+      break;
+    case "notas":
+      data.notas.push(v);
+      break;
+    case "agenda":
+      // O valor é a frase completa (ex.: "reunião amanhã às 15h")
+      return addAgenda(v);
+    case "historicoMusica": {
+      // Mesma lógica do addMusicHistory: dedupe + limite de 20 entradas
+      const faixas = parseInt(k, 10);
+      return addMusicHistory(v, Number.isFinite(faixas) ? faixas : 0);
+    }
+    default:
+      return { ok: false, message: "Seção desconhecida." };
+  }
+  scheduleSave();
+  return { ok: true, message: "Memória atualizada." };
+}
+
+/** Remove um item da memória por seção (painel do HUD). key é a chave (usuario/contatos) ou o texto (fatos/tarefas). */
+export async function memoryRemove(
+  section: MemorySection,
+  key: string,
+): Promise<{ ok: boolean; message: string }> {
+  const k = (key ?? "").trim();
+  if (!k) return { ok: false, message: "Chave vazia." };
+  const data = ensureLoaded();
+  switch (section) {
+    case "usuario": {
+      const hit = Object.keys(data.usuario).find((f) => norm(f) === norm(k) || f === k);
+      if (!hit) return { ok: false, message: "Chave não encontrada." };
+      delete data.usuario[hit];
+      break;
+    }
+    case "contatos": {
+      const hit = Object.keys(data.contatos).find((f) => norm(f) === norm(k) || f === k);
+      if (!hit) return { ok: false, message: "Contato não encontrado." };
+      delete data.contatos[hit];
+      break;
+    }
+    case "fatos": {
+      const idx = data.fatos.findIndex((f) => norm(f) === norm(k) || f === k);
+      if (idx < 0) return { ok: false, message: "Fato não encontrado." };
+      data.fatos.splice(idx, 1);
+      break;
+    }
+    case "tarefas": {
+      const idx = data.tarefas.findIndex((f) => norm(f) === norm(k) || f === k);
+      if (idx < 0) return { ok: false, message: "Tarefa não encontrada." };
+      data.tarefas.splice(idx, 1);
+      break;
+    }
+    case "notas": {
+      const idx = data.notas.findIndex((f) => norm(f) === norm(k) || f === k);
+      if (idx < 0) return { ok: false, message: "Anotação não encontrada." };
+      data.notas.splice(idx, 1);
+      break;
+    }
+    case "agenda":
+      // key é o id ou o título do compromisso
+      return removeAgenda(k);
+    case "historicoMusica": {
+      const idx = data.historicoMusica.findIndex((f) => norm(f.q) === norm(k) || f.q === k);
+      if (idx < 0) return { ok: false, message: "Entrada não encontrada no histórico." };
+      data.historicoMusica.splice(idx, 1);
+      break;
+    }
+    default:
+      return { ok: false, message: "Seção desconhecida." };
+  }
+  scheduleSave();
+  return { ok: true, message: "Item removido da memória." };
+}
