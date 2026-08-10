@@ -1,7 +1,13 @@
 {
-  "versao": "20260809-235201",
+  "versao": "20260809-235439",
   "npm": false,
   "exigeReinicio": false,
+  "notas": [
+    "Loading mais leve e bonito",
+    "Launcher novo (arthemis.bat)",
+    "Atualizacoes cumulativas (nao quebram mais)",
+    "Notas de versao exibidas apos instalar"
+  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
@@ -50,8 +56,8 @@
     },
     {
       "caminho": "app/api/publish/route.ts",
-      "url": "arquivos/c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d",
-      "sha256": "c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d"
+      "url": "arquivos/440d83c578125672d9e7d2af9e0b7b0ff9a93efae94b7642a755aadbe81f7d82",
+      "sha256": "440d83c578125672d9e7d2af9e0b7b0ff9a93efae94b7642a755aadbe81f7d82"
     },
     {
       "caminho": "app/api/resumo/route.ts",
@@ -85,8 +91,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b",
-      "sha256": "6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b"
+      "url": "arquivos/3171668a4f8393c3d342bc503b6e9ca7372ac3e51b5b9a0d32c504f03c581ced",
+      "sha256": "3171668a4f8393c3d342bc503b6e9ca7372ac3e51b5b9a0d32c504f03c581ced"
     },
     {
       "caminho": "app/icon.svg",
@@ -115,8 +121,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a",
-      "sha256": "2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a"
+      "url": "arquivos/8bb6b62b9d8bd39ece06a7cec7200816c5a1158a69c486112f46423150493a36",
+      "sha256": "8bb6b62b9d8bd39ece06a7cec7200816c5a1158a69c486112f46423150493a36"
     },
     {
       "caminho": "instrumentation.ts",
@@ -250,8 +256,8 @@
     },
     {
       "caminho": "lib/atualizador.ts",
-      "url": "arquivos/5345a32fd42534b260ba937d966c734c48f8601a1913199869071e651b1843bd",
-      "sha256": "5345a32fd42534b260ba937d966c734c48f8601a1913199869071e651b1843bd"
+      "url": "arquivos/a3916f87f7726153d4daa6503a43a893759bf628effc2197e48b7ca89c98b250",
+      "sha256": "a3916f87f7726153d4daa6503a43a893759bf628effc2197e48b7ca89c98b250"
     },
     {
       "caminho": "lib/bilingual.ts",
@@ -280,8 +286,8 @@
     },
     {
       "caminho": "lib/publicador.ts",
-      "url": "arquivos/a53b9be6c24e9b3234f2e38cca3424520d5984af51c209d0b3627a5481df7efe",
-      "sha256": "a53b9be6c24e9b3234f2e38cca3424520d5984af51c209d0b3627a5481df7efe"
+      "url": "arquivos/8a047c4956f4b9fbd8749644f3ce9624e3b5a79f3a559601dfad92d3066b7892",
+      "sha256": "8a047c4956f4b9fbd8749644f3ce9624e3b5a79f3a559601dfad92d3066b7892"
     },
     {
       "caminho": "lib/rppg.ts",
@@ -355,8 +361,8 @@
     },
     {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/eb52162627a8a7d19f981640e80906f84d97d5c3c45f68a247464a9383531c11",
-      "sha256": "eb52162627a8a7d19f981640e80906f84d97d5c3c45f68a247464a9383531c11"
+      "url": "arquivos/579f4d72129b33a419e877c507edd6a6290bafece689c9bb5e697e100398cba1",
+      "sha256": "579f4d72129b33a419e877c507edd6a6290bafece689c9bb5e697e100398cba1"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
