@@ -1,0 +1,987 @@
+import type { ToolCall } from "./types";
+import type { BuiltinResult } from "./builtinTypes";
+import {
+  addNote,
+  findContactSync,
+  forget,
+  getUserName,
+  listMemoryText,
+  listNotes,
+  normalizeContactName,
+  parseAgendaText,
+  remember,
+  removeNote,
+} from "./memory";
+import { isUnitWord } from "./units";
+import { getHermesStatus } from "./hermes";
+// keys.ts é um módulo folha — importar tools.ts aqui puxaria fs/os para o
+// caminho do cliente (o mesmo problema do memory.ts no AresOrb).
+import { parseSpecialKey } from "./keys";
+
+export type { BuiltinResult };
+
+const strip = (s: string) => (s ?? "").trim();
+const norm = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/** Extrai o caminho de um texto já limpo de prefixos. */
+function cleanPath(s: string): string {
+  return strip(s).replace(/^(a |o |de |em |pra |para |chamado |chamada |do |da )+/i, "").trim();
+}
+
+function match(text: string, patterns: string[]): string | null {
+  const n = norm(text);
+  for (const raw of patterns) {
+    const regex = new RegExp(raw, "i");
+    const m = n.match(regex);
+    if (m) return m[1] ?? "";
+  }
+  return null;
+}
+
+/** Assistentes embutido: reconhece comandos comuns em português sem precisar de modelo. */
+export function builtinParse(text: string): BuiltinResult | null {
+  const t = strip(text);
+  if (!t) return null;
+  if (t.length > 400) return null;
+
+  // ——— Saudações ———
+  if (/^(oi|ola|e ai|eai|hey|alo|bom dia|boa tarde|boa noite)\b/i.test(t)) {
+    const nome = getUserName();
+    return {
+      kind: "say",
+      text: `Olá${nome ? `, ${nome}` : ""}! Eu sou o Ares, sua inteligência artificial com autoridade total sobre o computador. Posso criar pastas, arquivos e projetos, abrir programas, e pesquisar na internet e redes sociais. O que você gostaria de fazer?`,
+    };
+  }
+
+  // ——— Hermes: status do daemon de velocidade ———
+  if (
+    /hermes/i.test(t) &&
+    /(?:status|como esta|como está|o que|fazendo|faz|fala|resumo|rapido|rápido)/i.test(t)
+  ) {
+    const st = getHermesStatus();
+    const aquecido = st.aquecido.length ? st.aquecido.join(" e ") : "ainda aquecendo";
+    const total = st.cache.hits + st.cache.misses;
+    const acertos = total > 0 ? Math.round((st.cache.hits / total) * 100) : 0;
+    const ytdlpTxt =
+      st.ytdlp === "ok" ? "youtube pronto" : st.ytdlp === "ausente" ? "youtube indisponível" : "youtube verificando";
+    return {
+      kind: "say",
+      text: `Hermes está ativo em segundo plano. Já aqueci ${aquecido}. Cache com ${st.cache.itens} itens e ${acertos} por cento de acerto. Cache de voz com ${st.tts.cacheItens} áudios prontos, e ${ytdlpTxt}. Uso de memória: ${st.heapMB} megabytes.`,
+    };
+  }
+
+  // ——— Criar pasta ———
+  const mkdir = match(t, [
+    "^(?:crie|criar|faca|fazer|crias|vou querer|quero)\\s+(?:uma\\s+)?pasta\\s+(?:chamada\\s+)?([^,]+)",
+    "^criar\\s+(?:uma\\s+)?pasta([^,]+)",
+  ]);
+  if (mkdir) {
+    const parts = mkdir.split(/\s+(?:em|dentro de|na|no)\s+/i);
+    const name = cleanPath(parts[0]);
+    const at = parts[1] ?? undefined;
+    if (name) {
+      return {
+        kind: "tool",
+        call: {
+          tool: "create_folder",
+          args: { path: at ? `${at}/${name}` : name },
+        },
+      };
+    }
+  }
+
+  // ——— Criar arquivo ———
+  const mkfile = match(t, [
+    "^(?:cria|crie|criar|faca|fazer)\\s+(?:um\\s+)?(?:arquivo|documento)\\s+(?:chamado\\s+)?([^,]+)",
+  ]);
+  if (mkfile) {
+    // Separa o “com conteudo X” do nome do arquivo (mkfile já vem normalizado)
+    const content = t.match(/com (?:o )?conte[úu]do(?: "?([^"]+)"?)?/i)?.[1]?.trim();
+    const namePart = content ? mkfile.split(/\s+com\s+(?:o\s+)?conteudo/i)[0] : mkfile;
+    const parts = namePart.split(/\s+(?:em|dentro de|na|no)\s+/i);
+    const name = cleanPath(parts[0]);
+    const at = parts[1] ?? undefined;
+    if (name) {
+      const call: ToolCall = {
+        tool: "create_file",
+        args: { path: at ? `${at}/${name}` : name },
+      };
+      if (content) call.args.conteudo = content;
+      return { kind: "tool" as const, call };
+    }
+  }
+
+  // ——— Criar projeto ———
+  const mkproj = match(t, [
+    "^(?:crie|criar|faca|fazer)\\s+(?:um\\s+)?projeto\\s+(?:chamado\\s+)?([^,]+)",
+  ]);
+  if (mkproj) {
+    const parts = mkproj.split(/\s+(?:em|dentro de|na|no)\s+/i);
+    const name = cleanPath(parts[0]);
+    const at = parts[1] ?? undefined;
+    if (name) {
+      return {
+        kind: "tool",
+        call: { tool: "create_project", args: { nome: name, ...(at ? { em: at } : {}) } },
+      };
+    }
+  }
+
+  // ——— Ler arquivo (modo coding; antes de “Listar” para não confundir “conteúdo”) ———
+  const readF = match(t, [
+    "^(?:leia|ler|le|me leia|me le|leia o|ler o)\\s+(?:o\\s+|a\\s+)?arquivo\\s+(.+)$",
+    "^(?:mostra|mostre|exibe|exiba|veja|ver|me mostra|me mostre)\\s+(?:o\\s+)?(?:conteudo\\s+(?:do|da|de)\\s+)?arquivo\\s+(.+)$",
+  ]);
+  if (readF) {
+    const caminho = cleanPath(readF).split(/\s+(?:a partir da linha|a partir de|da linha)\s+/i)[0];
+    if (caminho) {
+      const faixa = readF.match(/\s+(?:a partir da linha|a partir de|da linha)\s+(\d+)\s*(?:a\s+|ate\s+|até\s+|ao\s+)?(\d+)?$/i);
+      const args: Record<string, string> = { path: caminho };
+      if (faixa && faixa[1]) {
+        args.linhas = faixa[2] ? `${faixa[1]}-${faixa[2]}` : faixa[1];
+      }
+      return { kind: "tool", call: { tool: "read_file", args } };
+    }
+  }
+
+  // ——— Editar arquivo (trocar trecho exato por outro, modo coding) ———
+  const editM =
+    norm(t).match(
+      /^(?:troca|troque|trocas?|substitui|substitua|substituir|altera|altere|alterar|muda|mude|mudar)\s+(.+?)\s+(?:por|pra|para)\s+(.+?)\s+(?:no|em|do|da|de|dentro do|dentro da)\s+(?:arquivo\s+)?(.+)$/i,
+    ) ??
+    norm(t).match(
+      /^(?:edite|editar)\s+o\s+arquivo\s+(.+?)\s+(?:trocando|substituindo)\s+(.+?)\s+(?:por|para|pra)\s+(.+)$/i,
+    );
+  if (editM) {
+    const a = strip(editM[1]);
+    const b = strip(editM[2]);
+    const c = strip(editM[3]);
+    // Guarda: “no app/site/sistema…” não é um arquivo — deixa essas frases para o LLM
+    const nonFileTarget =
+      /^(?:app|site|sistema|tema|fundo|configuracao|janela|aplicativo|programa|pagina|pasta|arquivo)\b/i.test(c);
+    if (a && b && c && !nonFileTarget) {
+      return {
+        kind: "tool",
+        call: { tool: "edit_file", args: { path: c, de: a, para: b } },
+      };
+    }
+  }
+
+  // ——— Listar ———
+  const ls = match(t, [
+    "^(?:liste|listar|mostra|mostre|veja|ver|me mostre)\\s+(?:o que tem|o conteudo|o conteudo de|os arquivos de|os arquivos|o que existe)(?:\\s+em)?\\s+([^,]+)",
+    "^(?:liste|listar)\\s+(?:a pasta)?\\s*([^,]+)",
+  ]);
+  if (ls) {
+    return { kind: "tool", call: { tool: "list_folder", args: { path: cleanPath(ls) } } };
+  }
+
+  // ——— Abrir site/URL no navegador (antes de “abra pasta” para não confundir) ———
+  const openSite = match(t, [
+    "^(?:abra|abrir|ae?bre|abre)\\s+(?:o\\s+)?(?:site|site do|site da|pagina|url|link)\\s+(.+)$",
+    "^(?:abra|abrir|ae?bre|abre)\\s+no\\s+navegador\\s+(.+)$",
+  ]);
+  if (openSite) {
+    const target = strip(openSite).replace(/^[\s,.:;]+|[\s,.:;]+$/g, "");
+    if (target) {
+      return { kind: "tool", call: { tool: "open_url", args: { url: target } } };
+    }
+  }
+
+  // ——— Abrir ZIP/programa (antes de “abra pasta” para não confundir) ———
+  const openProg = match(t, [
+    "^(?:abra|abrir|abre|execute|executar|rode|rodar)\\s+(?:o\\s+)?(?:programa|app|aplicativo)\\s+(?:chamado\\s+|o\\s+)?([^,]+)$",
+    "^(?:abra|abrir|abre)\\s+(?:o\\s+)?(calculadora|calc|notepad|bloco de notas|paint|chrome|edge|firefox|discord|whatsapp|telegram|spotify|vscode|cmd|terminal|powershell|gerenciador de tarefas|explorador|word|excel|powerpoint|instagram)\\b([^,]*)$",
+  ]);
+  if (openProg) {
+    const prog = cleanPath(openProg).split(/\s+(?:pra|para|por favor)\s+/i)[0];
+    // Comando composto "abre o whatsapp e manda mensagem pra X": vai para o fluxo de WhatsApp
+    const mandaMsg = /^(?:manda|mande|envia|envie|mandar|enviar)\s+(?:uma\s+|um\s+)?(?:mensagem|msg|zap)\b/i;
+    const abreWzap = /^(?:abre|abrir)\s+o\s+(?:whatsapp|zap|zapzap)\s+(?:e|e o|e no)\s+/i;
+    const compoundMensagem = mandaMsg.test(norm(t)) || abreWzap.test(norm(t));
+    if (prog && !compoundMensagem) {
+      return { kind: "tool", call: { tool: "open_program", args: { programa: prog } } };
+    }
+  }
+
+  // ——— Abrir Instagram (antes de “abra pasta” para não confundir) ———
+  const igM = norm(t).match(
+    /^(?:abra|abrir|abre|veja|ver|mostra|mostre)\s+o\s+(?:perfil\s+)?(?:do|da|de)\s+(?:instagram\s+)?@?([a-z0-9_.]+)\s+no\s+instagram$/i,
+  ) ??
+    norm(t).match(
+      /^(?:abra|abrir|abre)\s+o\s+instagram\s+(?:do|da|de)\s+@?([a-z0-9_.]+)$/i,
+    ) ??
+    norm(t).match(/^abre\s+@?([a-z0-9_.]+)\s+no\s+instagram$/i);
+  if (igM) {
+    const user = (igM[1] ?? "").trim().replace(/^@/, "");
+    if (user) {
+      return { kind: "tool", call: { tool: "open_instagram", args: { usuario: user } } };
+    }
+  }
+
+  // ——— Tocar música/vídeo no YouTube (antes de “abra pasta” para não virar pasta) ———
+  const ytPlay = match(t, [
+    "^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|poe|abre|abra|assiste|assista|assistir)\\s+(?:a\\s+|o\\s+|um\\s+|uma\\s+)?(?:musica|música|video|vídeo|clipe|musiquinha)\\s+(?:sobre\\s+|de\\s+|do\\s+|da\\s+|chamada\\s+|chamado\\s+)?(.+)$",
+    "^(?:toca|toque|tocar|assiste|assista|assistir|coloca|coloque)\\s+(.+?)\\s+(?:no\\s+|no site\\s+)?youtube$",
+    "^(?:toca|toque|tocar|assiste|assista|assistir|coloca|coloque|abre|abra)\\s+(?:um\\s+|uma\\s+|o\\s+|a\\s+)?(?:tiktok|tik tok|reels|reel)\\s+(?:sobre\\s+|de\\s+|do\\s+|da\\s+)?(.+)$",
+  ]);
+  if (ytPlay) {
+    let q = strip(ytPlay)
+      .replace(/[.,;!?]+$/, "")
+      // "toca o video X no youtube" → tira o "no youtube" do fim
+      .replace(/\s+(?:no\s+|no site\s+)?youtube$/i, "")
+      .replace(
+        /^(?:um\s+|uma\s+)?(?:video|vídeo|musica|música|clipe|musiquinha)\s+(?:sobre\s+|de\s+|do\s+|da\s+)?/i,
+        "",
+      )
+      // "video do tiktok sobre X" / "video no instagram de X" / "reels de X"
+      .replace(
+        /^(?:(?:no|na|em)\s+)?(?:tiktok|tik tok|instagram|reels?)\s+(?:sobre\s+|de\s+|do\s+|da\s+)?/i,
+        "",
+      );
+    // Rede pelo conteúdo da frase (o padrão não captura qual rede foi dita)
+    let rede = "youtube";
+    if (/\b(?:tiktok|tik tok)\b/i.test(t)) rede = "tiktok";
+    else if (/\b(?:reels?|instagram)\b/i.test(t)) rede = "instagram";
+    if (q && q.length <= 120) {
+      return {
+        kind: "tool",
+        call: { tool: "social_search", args: { rede, consulta: q, direto: "1" } },
+      };
+    }
+  }
+
+  // ——— "Mostra os resultados de X no youtube" → abre a LISTA (não o vídeo) ———
+  const ytSearchList = match(t, [
+    "^(?:abre|abra|abrir|mostra|mostre|exibe|exiba|liste|listar)\\s+(?:a\\s+)?(?:busca|pesquisa|lista|resultados)\\s+(?:de|da|do|para|por)\\s+(.+?)\\s+(?:no|na)\\s+youtube$",
+    "^(?:abre|abra|abrir|mostra|mostre|exibe|exiba)\\s+(?:os\\s+)?resultados\\s+(?:de|da|do|para|por)?\\s*(.+?)\\s+(?:no|na)\\s+youtube$",
+  ]);
+  if (ytSearchList) {
+    const q = strip(ytSearchList)
+      .replace(/[.,;!?]+$/, "")
+      .replace(/^(?:de|da|do|para|por)\\s+/i, "");
+    if (q && q.length <= 120) {
+      return { kind: "tool", call: { tool: "social_search", args: { rede: "youtube", consulta: q } } };
+    }
+  }
+
+  // ——— "Abre o youtube" → abre o site do YouTube (não uma pasta) ———
+  if (/^(?:abre|abra|abrir)\s+(?:o\s+)?youtube$/i.test(t)) {
+    return { kind: "tool", call: { tool: "open_url", args: { url: "https://www.youtube.com" } } };
+  }
+
+  // ——— Abrir pasta ———
+  const open = match(t, [
+    "^(?:abra|abrir|ae?bre)\\s+(?:a\\s+)?(?:pasta\\s+)?([^,]+)",
+  ]);
+  if (open && /abra|abrir|abre\b/i.test(t)) {
+    // Se parece pedido de site/URL/programa (sem alvo), não trata como pasta
+    const path = cleanPath(open);
+    if (
+      path &&
+      !/^(o |a |no |na )?(site|url|link|pagina|página)\b/i.test(path) &&
+      !/^(calculadora|calc|notepad|bloco de notas|paint|chrome|edge|firefox|discord|whatsapp|telegram|spotify|vscode|cmd|terminal|powershell|gerenciador de tarefas|explorador|word|excel|powerpoint|instagram)\b/i.test(path) &&
+      // Painéis do HUD (comandos/controles) não são pastas do PC
+      !/^(o |a |os |as )?(painel hud|painel de comandos|painel de comando|painel de controle|painel de controles|comandos|controles)\b/i.test(path)
+    ) {
+      return { kind: "tool", call: { tool: "open_folder", args: { path } } };
+    }
+  }
+
+  // ——— Lista de tarefas (antes de “apagar/abrir” para não confundir alvos) ———
+  const taskAdd = match(t, [
+    "^(?:adiciona|adicionar|anota|anote|coloca|coloque|guarda|guardar|escreve|escrever)\\s+(?:na\\s+minha\\s+)?(?:lista\\s+de\\s+)?tarefas?\\s+(.+)$",
+    "^(?:adiciona|adicionar|anota|anote)\\s+(.+?)\\s+(?:na\\s+minha\\s+)?lista\\s+de\\s+tarefas$",
+    "^(?:lembra\\s+me|lembre\\s+me|me\\s+lembra|me\\s+lembre)\\s+de\\s+(.+)$",
+  ]);
+  if (taskAdd) {
+    return { kind: "tool", call: { tool: "add_task", args: { tarefa: strip(taskAdd) } } };
+  }
+
+  const taskRemove = match(t, [
+    "^(?:remove|remover|apaga|apagar|tira|tirar|exclui|excluir|risca|riscar)\\s+(?:da\\s+minha\\s+)?(?:lista\\s+de\\s+)?tarefas?\\s+(.+)$",
+  ]);
+  if (taskRemove) {
+    return { kind: "tool", call: { tool: "remove_task", args: { tarefa: strip(taskRemove) } } };
+  }
+
+  const taskList = match(t, [
+    "^((?:quais\\s+sao\\s+minhas\\s+tarefas|quais\\s+minhas\\s+tarefas|minhas\\s+tarefas|lista\\s+de\\s+tarefas|listar\\s+tarefas|o\\s+que\\s+tenho\\s+(?:para|pra)\\s+fazer))$",
+  ]);
+  if (taskList) {
+    return { kind: "tool", call: { tool: "list_tasks", args: {} } };
+  }
+
+  // ——— Agenda/calendário (compromissos com data e hora) ———
+  // Adicionar vem primeiro, mas só dispara se der para interpretar data/hora
+  // E sobrar um título ("agenda de hoje" → título vazio → cai no listar).
+  const agendaAdd = match(t, [
+    "^(?:marca|marque|marcar|agenda|agende|agendar|anota|anote|adiciona|adicionar|coloca|coloque|guarda|guardar|lembrete|lembra|lembre|compromisso|compromissos)\\s+(?:na\\s+minha\\s+)?(?:agenda\\s+|agenda do calendario\\s+|calendario\\s+|compromisso\\s+|compromissos\\s+)?(.+)$",
+    "^(?:marca|marque|marcar)\\s+(.+?)\\s+(?:na\\s+minha\\s+)?agenda$",
+  ]);
+  if (agendaAdd) {
+    const texto = strip(agendaAdd);
+    const parsed = parseAgendaText(texto);
+    if (parsed) {
+      return { kind: "tool", call: { tool: "add_agenda", args: { texto } } };
+    }
+  }
+
+  // "toda sexta às 10h reunião de time" (recorrência sem verbo): só dispara
+  // se der para interpretar data/hora — senão cai nos outros comandos.
+  const agendaRec = /^(toda|todas|todo|todos)\s+(?:a\s+|as\s+|o\s+|os\s+)?(.+)$/i.exec(
+    t,
+  );
+  if (agendaRec) {
+    const texto = `${agendaRec[1]} ${agendaRec[2]}`;
+    const parsed = parseAgendaText(texto);
+    if (parsed) {
+      return { kind: "tool", call: { tool: "add_agenda", args: { texto } } };
+    }
+  }
+
+  const agendaRemove = match(t, [
+    "^(?:remove|remover|apaga|apagar|tira|tirar|exclui|excluir|cancela|cancelar|desmarca|desmarcar)\\s+(?:(?:da|na|em)\\s+(?:minha\\s+)?)?(?:agenda|agenda do calendario|calendario|compromisso|compromissos)\\s+(?:o\\s+|a\\s+|os\\s+|as\\s+)?(.+)$",
+    "^(?:remove|remover|apaga|apagar|cancela|cancelar|desmarca|desmarcar)\\s+(?:o\\s+|a\\s+|os\\s+|as\\s+)?(?:compromisso|compromissos)\\s+(.+)$",
+    "^(?:remove|remover|apaga|apagar|cancela|cancelar|desmarca|desmarcar)\\s+(?:o\\s+|a\\s+)?(.+?)\\s+(?:da\\s+minha\\s+|da\\s+|na\\s+|em\\s+minha\\s+)?agenda$",
+  ]);
+  if (agendaRemove) {
+    return {
+      kind: "tool",
+      call: { tool: "remove_agenda", args: { filtro: strip(agendaRemove) } },
+    };
+  }
+
+  // Frases completas sem filtro → lista os próximos compromissos.
+  // Tudo ancorado num único grupo (^…$) para "apaga minha agenda X" não casar
+  // por substring e virar lista em vez de remoção.
+  const agendaListFull =
+    /^(?:(?:o que tenho|o que eu tenho|o que tem|tenho)\s+(?:na minha agenda|na agenda|no calendario|agendado|marcado|para hoje)|minha agenda|quais sao meus compromissos|meus compromissos|lista de compromissos|o que tenho agendado|agenda)$/i.test(
+      norm(t),
+    );
+  if (agendaListFull) {
+    return { kind: "tool", call: { tool: "list_agenda", args: {} } };
+  }
+
+  const agendaList = match(t, [
+    "^(?:o que tenho|tenho|o que eu tenho)\\s+(.+?)\\s+(?:na agenda|no calendario|agendado|marcado)$",
+    "^(?:agenda|compromissos?)\\s+(?:de|da|do|para|pra|na|no|desta|dessa)?\\s*(.+)$",
+  ]);
+  if (agendaList) {
+    // O filtro capturado pode ter sobrado "de/da/do" (ex.: "agenda de sexta")
+    const filtro = strip(agendaList)
+      .replace(/^(?:de|da|do|para|pra|na|no|desta|dessa)\\s+/i, "")
+      .trim();
+    return { kind: "tool", call: { tool: "list_agenda", args: filtro ? { quando: filtro } : {} } };
+  }
+
+  // ——— Apagar ———
+  const del = match(t, [
+    "^(?:apaga|apagar|exclui|excluir|remove|remover|deleta|deletar)\\s+(?:a\\s+)?(?:pasta\\s+|arquivo\\s+|o\\s+)?([^,]+)",
+  ]);
+  if (del) {
+    const target = cleanPath(del);
+    if (target) {
+      return {
+        kind: "tool",
+        call: { tool: "delete_path", args: { path: target } },
+      };
+    }
+  }
+
+  // ——— Renomear ———
+  const ren = match(t, [
+    "^(?:renomeie|renomear)\\s+(.+?)\\s+(?:para|pra)\\s+(.+)$",
+  ]);
+  if (ren) {
+    const [from, to] = ren.split(/\s+(?:para|pra)\s+/i);
+    if (from && to) {
+      return {
+        kind: "tool",
+        call: { tool: "rename_path", args: { origem: cleanPath(from), destino: cleanPath(to) } },
+      };
+    }
+  }
+
+  // ——— Print da tela ———
+  const shot =
+    norm(t).match(
+      /^(?:tira|tire|tirar|faca|faz|fazer|pegue|pega)\s+(?:um\s+|uma\s+)?(?:print\s+(?:da\s+)?tela|print|screenshot|captura\s+(?:de|da)\s+tela|foto\s+(?:da|de)\s+tela)\s*(?:(?:em|(?:e\s+)?(?:salva|salve|guarda|guarde)\s+em)\s+(.+))?$/i,
+    ) ??
+    norm(t).match(/^captura\s+(?:de|da)\s+tela\s*(?:em\s+(.+))?$/i);
+  if (shot) {
+    const em = strip(shot[1] ?? "");
+    return {
+      kind: "tool",
+      call: { tool: "take_screenshot", args: em ? { salvar: cleanPath(em) } : {} },
+    };
+  }
+
+  // ——— Ler a tela (OCR) ———
+  if (
+    /^(?:leia|lê|ler|le|me leia|me le|olha|olhe)\s+(?:a\s+)?tela$/i.test(t) ||
+    /^(?:o que|oq|oque)\s+(?:está|esta|ta|tá|tem|tem escrito)\s+(?:escrito\s+)?(?:na|em)\s+(?:tela|a tela|pantalla)\b/i.test(t) ||
+    /^(?:leia|ler|le)\s+(?:o\s+que\s+)?(?:esta|está)\s+(?:escrito|aparecendo)\s+(?:na\s+)?tela/i.test(t)
+  ) {
+    return { kind: "tool", call: { tool: "screen_read", args: {} } };
+  }
+
+  // ——— Clique por coordenadas: “clica no ponto 500 300” ———
+  // Vem ANTES do clique genérico para não virar texto (“ponto 500 300”).
+  const coordM = norm(t).match(
+    /^(?:clica|clique|clicar|aperta|aperte|apertar)\s+(?:em\s+|no\s+|na\s+)?(?:o\s+)?ponto\s+(\d{1,5})[\s,]+(\d{1,5})$/i,
+  );
+  if (coordM) {
+    return {
+      kind: "tool",
+      call: { tool: "screen_click", args: { x: coordM[1], y: coordM[2] } },
+    };
+  }
+
+  // ——— Duplo clique: “clica duas vezes em X” / “dá dois cliques em X” ———
+  const dblClickM = norm(t).match(
+    /^(?:clica|clique|clicar|aperta|aperte|apertar|da|dá|de|dê)\s+(?:duas\s+vezes|dois\s+cliques|2\s+cliques)\s+(?:em\s+|no\s+|na\s+)?(.+)$/i,
+  );
+  if (dblClickM) {
+    const alvo = strip(dblClickM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    if (alvo && alvo.length <= 40) {
+      return { kind: "tool", call: { tool: "screen_click", args: { texto: alvo, duplo: "1" } } };
+    }
+  }
+
+  // ——— "Veja a tela e clique em X" — lê a tela e clica numa ação só ———
+  const combinedClickM = norm(t).match(
+    /^(?:veja|ver|olha|olhe|leia|lê|ler|le|me leia|me le)\s+(?:a\s+)?tela\s+(?:e|e depois|depois|então|entao|e em seguida)\s+(?:clica|clique|clicar|aperta|aperte|apertar)\s+(?:em\s+|no\s+|na\s+|no botao\s+|na botao\s+)?(.+)$/i,
+  );
+  if (combinedClickM) {
+    const alvo = strip(combinedClickM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    if (alvo && alvo.length <= 40) {
+      return { kind: "tool", call: { tool: "screen_click", args: { texto: alvo } } };
+    }
+  }
+
+  // ——— Digitar texto na tela: “digita olá mundo” / “digite o preço e aperta enter” ———
+  // Usa o texto ORIGINAL (com acentos): o que vai para a tela deve ser fiel ao falado.
+  const typeM = t.match(
+    /^(?:digita|digite|digitar)\s+(?:na\s+tela\s+|no\s+campo\s+(?:de\s+)?(?:busca\s+|pesquisa\s+|texto\s+|digitacao\s+|digitação\s+)?|no\s+input\s+de\s+)?(.+)$/i,
+  );
+  if (typeM) {
+    let alvo = strip(typeM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    // Guarda: “digita um arquivo/pasta/anotação” são outros comandos
+    const naoEhTexto =
+      /^(?:um\s+|uma\s+|o\s+|a\s+)?(?:arquivo|pasta|projeto|documento|word|excel|powerpoint|anotacao|anota)\b/i.test(
+        alvo,
+      );
+    if (alvo && alvo.length <= 200 && !naoEhTexto) {
+      // “digita X e aperta enter/tab/esc…” → digita e pressiona a tecla
+      const keySuf = alvo.match(
+        /\s+(?:e\s+)?(?:aperta|aperte|apertar|pressiona|pressione|da|dá|dar)\s+(?:a\s+|na\s+)?(?:tecla\s+)?(.+?)\s*$/i,
+      );
+      const args: Record<string, string> = { texto: alvo };
+      if (keySuf) {
+        const tecla = strip(keySuf[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+        if (tecla && parseSpecialKey(tecla)) {
+          args.key = tecla;
+          args.texto = alvo.slice(0, keySuf.index).trim();
+        }
+      }
+      if (args.texto) {
+        return { kind: "tool", call: { tool: "type_text", args } };
+      }
+    }
+  }
+
+  // ——— Apertar tecla: “aperta enter”, “pressiona tab”, “dá enter” ———
+  // Vem ANTES do clique genérico: “aperta enter” não é clique em texto.
+  const keyM = norm(t).match(
+    /^(?:aperta|aperte|apertar|pressiona|pressione|pressionar|da|dá|dar)\s+(?:a\s+|na\s+|no\s+)?(?:tecla\s+|botao\s+|botão\s+)?(.+)$/i,
+  );
+  if (keyM) {
+    const tecla = strip(keyM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    // Só vira tecla se for conhecida — “aperta o botão enviar” continua sendo clique
+    if (tecla && tecla.length <= 24 && parseSpecialKey(tecla)) {
+      return { kind: "tool", call: { tool: "type_text", args: { key: tecla } } };
+    }
+  }
+
+  // ——— Visão: descrever a tela com modelo vision gratuito ———
+  // “descreve a tela”, “me descreve a tela”, “o que você vê na tela?”
+  if (
+    /^(?:descreve|descreva|descrever|me descreve|me descreva)\s+(?:a\s+)?tela\s*\??$/i.test(
+      norm(t),
+    ) ||
+    /^(?:o que|oq|oque)\s+(?:voce|você)\s+(?:esta|está|ta|tá\s+)?(?:vendo|enxergando|ve|vê|enxerga)\s*(?:na\s+tela)?\s*\??$/i.test(
+      norm(t),
+    ) ||
+    /^(?:o que|oq|oque)\s+(?:tem|esta|está|aparece)\s+(?:aberto|aberta|abertos|abertas|na tela|na pantalla)\s*\??$/i.test(
+      norm(t),
+    )
+  ) {
+    return {
+      kind: "tool",
+      call: {
+        tool: "screen_ask",
+        args: {
+          pergunta:
+            "Descreva em português o que está visível na tela: janelas, textos, botões e elementos importantes.",
+        },
+      },
+    };
+  }
+
+  // ——— Clicar em texto na tela (usa a última leitura de tela) ———
+  // Verbos restritos a clicar/aperta r: “toque/toca” são ambíguos com música
+  // (“toque uma música” não deve virar clique em tela).
+  const clickM = norm(t).match(
+    /^(?:clica|clique|clicar|aperta|aperte|apertar)\s+(?:em\s+|no\s+|na\s+|no botao\s+|na botao\s+)?(.+)$/i,
+  );
+  if (clickM) {
+    const alvo = strip(clickM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    if (alvo && alvo.length <= 40) {
+      return { kind: "tool", call: { tool: "screen_click", args: { texto: alvo } } };
+    }
+  }
+
+  // ——— Janelas do Windows: maximizar / minimizar / restaurar ———
+  // “maximiza a janela do chrome” / “maximiza o chrome” / “minimiza o word”…
+  const winSizeM =
+    norm(t).match(
+      /^(?:maximiza|maximize|maximizar|amplia|amplie|estende|estenda)\s+(?:a\s+)?(?:janela\s+(?:do|da|de)\s+|o\s+|a\s+)?(.+)$/i,
+    ) ??
+    norm(t).match(
+      /^(?:minimiza|minimize|minimizar|recolhe|recolha)\s+(?:a\s+)?(?:janela\s+(?:do|da|de)\s+|o\s+|a\s+)?(.+)$/i,
+    ) ??
+    norm(t).match(
+      /^(?:restaura|restaure|restaurar)\s+(?:a\s+)?(?:janela\s+(?:do|da|de)\s+|o\s+|a\s+)?(.+)$/i,
+    );
+  if (winSizeM) {
+    const alvo = strip(winSizeM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    // Guarda: “maximiza o painel de comandos” é comando do HUD, não janela do Windows
+    const hudPanel = /^(?:o |a |os |as )?(?:painel hud|painel de comandos|painel de comando|painel de controle|painel de controles|comandos|controles|navegador do hud)\b/i.test(
+      alvo,
+    );
+    if (alvo && alvo.length <= 40 && !hudPanel) {
+      const acao = /^minimiza|^minimize|^minimizar|^recolhe|^recolha/.test(winSizeM[0])
+        ? "minimizar"
+        : /^restaura|^restaure|^restaurar/.test(winSizeM[0])
+          ? "restaurar"
+          : "maximizar";
+      return {
+        kind: "tool",
+        call: { tool: "window_control", args: { acao, janela: alvo } },
+      };
+    }
+  }
+
+  // ——— Fechar janela do Windows: “fecha a janela do chrome” ———
+  const winCloseM = norm(t).match(
+    /^(?:fecha|feche|fechar)\s+(?:a\s+)?(?:janela\s+(?:do|da|de)\s+|o\s+|a\s+)?(.+)$/i,
+  );
+  if (winCloseM) {
+    const alvo = strip(winCloseM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    // Só quando é claramente uma janela de programa (não aba, não painel HUD, não arquivo)
+    const isApp =
+      /^(?:chrome|edge|firefox|word|excel|powerpoint|power point|notepad|bloco de notas|calc|calculadora|vscode|code|visual studio code|whatsapp|discord|spotify|telegram|explorador|explorer|cmd|terminal|powershell|outlook)\b/i.test(
+        alvo,
+      ) ||
+      /\bjanela\b/i.test(norm(t));
+    if (alvo && alvo.length <= 40 && isApp && !/\b(?:aba|aba do|navegador do hud)\b/i.test(norm(t))) {
+      return {
+        kind: "tool",
+        call: { tool: "window_control", args: { acao: "fechar", janela: alvo } },
+      };
+    }
+  }
+
+  // ——— Alternar/ativar janela: “alterna para o chrome”, “vai para o word”, “ativa o vscode” ———
+  const winSwitchM = norm(t).match(
+    /^(?:alterna|alterne|alternar|troca|troque|muda|mude|mudar|vai|va|vá|ir|ativa|ative|ativar|foca|foque)\s+(?:para\s+)?(?:o\s+|a\s+)?(?:janela\s+(?:do|da|de)\s+)?(.+)$/i,
+  );
+  if (winSwitchM) {
+    const alvo = strip(winSwitchM[1] ?? "").replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    const isApp =
+      /^(?:chrome|edge|firefox|word|excel|powerpoint|power point|notepad|bloco de notas|calc|calculadora|vscode|code|visual studio code|whatsapp|discord|spotify|telegram|explorador|explorer|cmd|terminal|powershell|outlook)\b/i.test(
+        alvo,
+      ) ||
+      /\bjanela\b/i.test(norm(t));
+    // Guarda: “vai para a aba 2” é aba do navegador, não janela do Windows
+    if (alvo && alvo.length <= 40 && isApp && !/^aba\b|\baba \d/.test(alvo) && !/\baba\b/i.test(norm(t))) {
+      return {
+        kind: "tool",
+        call: { tool: "window_control", args: { acao: "ativar", janela: alvo } },
+      };
+    }
+  }
+
+  // ——— Listar janelas abertas ———
+  if (
+    /^(?:quais|lista|listar|mostra|mostre)\s+(?:as\s+)?(?:janelas?|programas?\s+abertos|aplicativos?\s+abertos)\s+(?:abertas?|abertos|em\s+aberto)?/i.test(
+      norm(t),
+    )
+  ) {
+    return { kind: "tool", call: { tool: "list_windows", args: {} } };
+  }
+
+  // ——— Ler WhatsApp (sessão real): “lê o whatsapp”, “o que chegou no zap” ———
+  // Guarda de envio: “abre o whatsapp e manda zap…” pertence ao send_whatsapp.
+  const waRead =
+    /^(?:(?:leia|l[eê]|ler|mostra|mostre|mostrar|me\s+mostra|me\s+mostre|me\s+leia|me\s+l[eê]|conta|conte|me\s+conta|me\s+conte|abre)\s+(?:o\s+|a\s+|as\s+|as\s+minhas\s+)?(?:(?:whatsapp|zap|zapzap|conversas|mensagens|mensagens\s+do\s+whatsapp|mensagens\s+do\s+zap|caixa\s+de\s+entrada)|(?:minhas\s+(?:mensagens|conversas)))(?:\s+(?:do|no|da)\s+(?:whatsapp|zap|zapzap))?(?!\s+(?:e|e o|e no)\s+(?:manda|mande|envia|envie|mandar|enviar|m[áa]o)\b))|(?:o\s+que\s+(?:chegou|tem|tem\s+de\s+novo|recebi|recebi\s+no)\s+(?:no\s+)?(?:whatsapp|zap|zapzap))|^(?:quais|quais\s+s[ãa]o)\s+(?:as\s+minhas\s+|as\s+)?(?:mensagens|conversas)\b/i;
+  const waReadM = norm(t).match(waRead);
+  if (waReadM) {
+    // “lê o whatsapp da mãe” → conversa específica
+    const rest = norm(t).slice((waReadM[0] ?? "").length).trim().replace(/^(?:do|da|de|com|no|na)\s+/i, "");
+    if (rest && rest.length > 2 && rest.length < 40) {
+      return {
+        kind: "tool",
+        call: { tool: "whatsapp_read", args: { conversa: rest } },
+      };
+    }
+    return { kind: "tool", call: { tool: "whatsapp_read", args: {} } };
+  }
+
+  // ——— WhatsApp (número ou contato pelo nome) ———
+  const waPre = /^(?:abre|abrir)\s+o\s+(?:whatsapp|zap|zapzap)\s+(?:e|e o|e no)\s+/i;
+  // Aceita “mensagem”, “msg” ou “zap”: “manda zap pra mãe dizendo oi”
+  const waBody = /^(?:manda|mande|envia|envie|mandar|enviar)\s+(?:uma\s+|um\s+)?(?:mensagem|msg|zap)\b\s*(.*)$/i;
+  const waM = norm(t).replace(waPre, "").trim().match(waBody);
+  if (waM) {
+    let waRest = (waM[1] ?? "").trim().replace(/^(?:no|pro|para o|pra)\s+whatsapp\b\s*/i, "").trim();
+    waRest = waRest
+      .replace(/^(?:para o whatsapp|para|pro|pra|no|ao|a|da|de|do)\s+(?:o|a)\s+/i, "")
+      .replace(/^(?:para o whatsapp|para|pro|pra|no|ao|a|da|de|do)\s+/i, "");
+    let target = waRest;
+    let mensagem = "Oi!";
+    const waPhrases = [" dizendo:", " dizendo ", " com o texto ", " com a mensagem ", " que diz ", " falando "];
+    for (const phrase of waPhrases) {
+      const idx = waRest.indexOf(phrase);
+      if (idx !== -1) {
+        target = waRest.slice(0, idx).trim();
+        mensagem = waRest.slice(idx + phrase.length).trim();
+        break;
+      }
+    }
+    const digits = target.replace(/\D/g, "");
+    if (digits.length >= 8) {
+      return {
+        kind: "tool",
+        call: { tool: "send_whatsapp", args: { numero: digits, mensagem } },
+      };
+    }
+    const numero = findContactSync(target);
+    if (numero) {
+      return {
+        kind: "tool",
+        call: {
+          tool: "send_whatsapp",
+          args: { numero, contato: target, mensagem },
+        },
+      };
+    }
+    return {
+      kind: "say",
+      text: `Não tenho o número de ${target} na memória. Me diga o número, por exemplo: o número da ${target} é 55 11 99999 9999. Aí eu guardo e uso da próxima vez.`,
+    };
+  }
+
+  // ——— Previsão do tempo (Open-Meteo) ———
+  const weather = match(t, [
+    "^(?:qual é|qual e|me diga|me fale|me fala)\\s+(?:a previsão do tempo|a previsao do tempo|o tempo)\\s+(?:em|na|no)\\s+(.+)$",
+    "^(?:previsão do tempo|previsao do tempo)\\s+(?:em|na|no)?\\s*(.+)$",
+    "^(?:como está o tempo|como esta o tempo|como ta o tempo|como tá o tempo)\\s+(?:em|na|no)?\\s*(.+)$",
+    "^(?:qual a temperatura|qual é a temperatura|qual e a temperatura)\\s+(?:em|na|no)\\s*(.+)$",
+    "^(?:vai chover|vai nevar|vai fazer frio|vai fazer calor)\\s+(?:em|na|no)\\s+(.+)$",
+  ]);
+  if (weather) {
+    return { kind: "tool", call: { tool: "weather", args: { cidade: strip(weather) } } };
+  }
+
+  // ——— Conversão de medidas (antes de moedas: "5 metros em cm" não é câmbio) ———
+  const unitsSwapM =
+    norm(t).match(/^(?:quantos|quantas)\s+(.+?)\s+(?:tem|ha|sao|eh|e)\s+([\d.,\s]+)\s+(.+?)(?:\s+em|\s+para|\s*)$/i);
+  if (unitsSwapM) {
+    const valor = unitsSwapM[2].trim();
+    const de = unitsSwapM[3].trim();
+    const para = unitsSwapM[1].trim();
+    if (isUnitWord(de) && isUnitWord(para) && /[\d]/.test(valor)) {
+      return {
+        kind: "tool",
+        call: { tool: "convert_units", args: { valor, de, para } },
+      };
+    }
+  }
+
+  const unitsM =
+    norm(t).match(/^(?:quanto|quantos)\s+(?:e|eh|vale|valem|sao)?\s*([\d.,\s]+)\s+(.+?)\s+(?:em|para)\s+(.+)$/i) ??
+    norm(t).match(/^(?:converta|converter|converte|convertera)\s+([\d.,\s]+)\s+(.+?)\s+(?:em|para)\s+(.+)$/i) ??
+    norm(t).match(/^([\d.,\s]+)\s+(.+?)\s+(?:em|para)\s+(.+)$/i);
+  if (unitsM) {
+    const de = unitsM[2].trim();
+    const para = unitsM[3].trim();
+    if (isUnitWord(de) && isUnitWord(para)) {
+      return {
+        kind: "tool",
+        call: {
+          tool: "convert_units",
+          args: { valor: unitsM[1].trim(), de, para },
+        },
+      };
+    }
+  }
+
+  // ——— Conversão de moedas ———
+  const curM =
+    norm(t).match(/^(?:quanto|quantos)\s+(?:e|eh|vale|valem|sao)?\s*([\d.,\s]+)\s+([a-z]+s?)\s+(?:em|para)\s+([a-z]+s?)$/i) ??
+    norm(t).match(/^(?:converta|converter|converte|convertera)\s+([\d.,\s]+)\s+([a-z]+s?)\s+(?:em|para)\s+([a-z]+s?)$/i) ??
+    norm(t).match(/^(?:quanto vale o|quanto vale a)\s+([a-z]+)\s+(?:em|para)\s+([a-z]+s?)$/i) ??
+    norm(t).match(/^(?:quanto vale)\s+([\d.,\s]+)\s+([a-z]+s?)\s+(?:em|para)\s+([a-z]+s?)$/i);
+  if (curM) {
+    const g = curM.slice(1);
+    if (g.length === 3) {
+      return { kind: "tool", call: { tool: "currency", args: { valor: g[0], de: g[1], para: g[2] } } };
+    }
+    if (g.length === 2) {
+      return { kind: "tool", call: { tool: "currency", args: { valor: "1", de: g[0], para: g[1] } } };
+    }
+  }
+
+  // ——— Cotações de criptomoedas (CoinGecko) ———
+  const crypto =
+    match(t, ["^(?:cotação|cotacao|preço|preco|valor)\\s+(?:do|da|de)\\s+([a-z0-9]+)$"]) ??
+    match(t, [
+      "^(?:quanto vale o|quanto custa o)\\s+(bitcoin|btc|ethereum|eth|ether|solana|sol|dogecoin|doge|cardano|ada|ripple|xrp|litecoin|ltc|bnb|polkadot|dot|chainlink|link|shiba|avalanche|avax)$",
+    ]);
+  if (crypto) {
+    return { kind: "tool", call: { tool: "crypto", args: { cripto: strip(crypto) } } };
+  }
+
+  // ——— Informações de países (REST Countries) ———
+  const country = match(t, [
+    "^(?:capital|qual é a capital|qual e a capital|qual a capital)\\s+(?:de|do|da)\\s+(.+)$",
+    "^(?:população de|populacao de|população do|populacao do|população da|populacao da)\\s+(.+)$",
+    "^(?:qual é a moeda|qual e a moeda|qual a moeda|moeda)\\s+(?:de|do|da)\\s+(.+)$",
+    "^(?:qual é o idioma|qual e o idioma|idioma da|idioma do|idioma de)\\s+(.+)$",
+    "^(?:onde fica)\\s+(.+)$",
+  ]);
+  if (country) {
+    return { kind: "tool", call: { tool: "country", args: { pais: strip(country) } } };
+  }
+
+  // ——— Piada (JokeAPI) ———
+  if (
+    /^(?:conta|conte|fala|fale|me conta|me conte|me fala|me fale)\s+(?:uma\s+)?piada$/i.test(t) ||
+    /^(?:tem|sabe)\s+uma\s+piada$/i.test(t)
+  ) {
+    return { kind: "tool", call: { tool: "joke", args: {} } };
+  }
+
+  // ——— Pesquisar em redes sociais ———
+  const SOCIAL_NETWORKS = "(?:youtube|tiktok|twitter|x|instagram|facebook|linkedin|github|google|web|site)";
+  // Forma 1: "pesquisa X no google" / "quem é X no github" → grupos (consulta, rede)
+  const socialQueryFirst =
+    norm(t).match(
+      new RegExp(
+        "^(?:pesquise|pesquisa|pesquisar|procure|procura|busque|busca|procura por)\\s+(?:o\\s+)?(?:perfil\\s+)?(?:do|da|de\\s)?([^,]+?)\\s+(?:no|na)\\s+(" +
+          SOCIAL_NETWORKS +
+          ")$",
+        "i",
+      ),
+    ) ??
+    norm(t).match(
+      new RegExp("^quem\\s+e\\s+([^,]+?)\\s+(?:no|na)\\s+(" + SOCIAL_NETWORKS + ")$", "i"),
+    );
+  if (socialQueryFirst) {
+    const a = (socialQueryFirst[1] ?? "").trim();
+    const b = (socialQueryFirst[2] ?? "").trim();
+    if (a && b) {
+      return {
+        kind: "tool",
+        call: { tool: "social_search", args: b === "youtube" ? { rede: b, consulta: a, direto: "1" } : { rede: b, consulta: a } },
+      };
+    }
+  }
+  // Forma 2: "pesquisa no google X" → grupos INVERTIDOS (rede, consulta)
+  const socialNetworkFirst = norm(t).match(
+    new RegExp(
+      "^(?:pesquise|pesquisa|pesquisar|procure|procura|busque|busca)\\s+(?:no|na)\\s+(" +
+        SOCIAL_NETWORKS +
+        ")\\s+(?:sobre\\s+|por\\s+)?([^,]+)$",
+      "i",
+    ),
+  );
+  if (socialNetworkFirst) {
+    const rede = (socialNetworkFirst[1] ?? "").trim();
+    const consulta = (socialNetworkFirst[2] ?? "").trim();
+    if (rede && consulta) {
+      return { kind: "tool", call: { tool: "social_search", args: rede === "youtube" ? { rede, consulta, direto: "1" } : { rede, consulta } } };
+    }
+  }
+
+  // ——— Mostrar uma imagem no HUD (visualizador de imagens) ———
+  // “mostra uma imagem de X”, “pesquisa uma imagem de X”, “quero ver a foto de X”
+  // NÃO é busca de links: é para VER a imagem numa janela do HUD.
+  // Regex literais (sem construir string): imunes a problemas de escaping.
+  const showImgM =
+    t.match(
+      /^(?:mostra|mostre|exiba|me mostra|me mostre|quero ver|quero que (?:você|voce) mostre|ver uma|preciso ver|quero uma|quero a)\s+(?:uma\s+|a\s+|essa\s+|esta\s+)?(?:imagem|foto|figura|imagens|fotos)\s+(?:de|sobre|do|da|com|de um|de uma)\s+(.+)$/i,
+    ) ??
+    t.match(
+      /^(?:pesquisa|pesquise|pesquisar|procura|procure|busca|busque|acha|ache|encontra|encontre|mostra|mostre|exibe|exiba)\s+(?:uma\s+|a\s+)?(?:imagem|foto|figura)\s+(?:de|sobre|do|da|com|de um|de uma)\s+(.+)$/i,
+    );
+  if (showImgM) {
+    const q = strip(showImgM[1]).replace(/^[.,;:!?\s]+|[.,;:!?\s]+$/g, "");
+    if (q) {
+      return { kind: "tool", call: { tool: "show_image", args: { assunto: q } } };
+    }
+  }
+
+  // ——— Pesquisar na internet ———
+  // Verbos explícitos de busca aceitam qualquer consulta; “me diga/me fale” exige palavra-chave
+  const search = match(t, [
+    "^(?:pesquise|pesquisa|pesquisar|procure|procura|busque|busca)\\s+(?:na\\s+)?(?:internet|web|google)?\\s*(?:sobre\\s+|o que e\\s+|quem e\\s+|quem foi\\s+|como\\s+)?(.+)$",
+    "^(?:me diga|me fale)\\s+(?:sobre\\s+|o que e\\s+|quem e\\s+|quem foi\\s+|como\\s+)(.+)$",
+  ]);
+  if (search) {
+    const q = strip(search)
+      .replace(/^[\s,.:;]+|[\s,.:;]+$/g, "")
+      .replace(/^por\\s+/i, "")
+      // "pesquisa no google X" / "pesquisa na internet X" (rede antes da consulta)
+      .replace(
+        /^(?:no|na|em)\s+(?:google|internet|web|navegador|browser)\s+(?:sobre\s+|por\s+)?/i,
+        "",
+      );
+    if (q) {
+      return { kind: "tool", call: { tool: "web_search", args: { consulta: q } } };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Comandos de memória embutidos (sem precisar de LLM): guardar nome/contato/fato,
+ * esquecer e relembrar. Retorna null se o texto não for um comando de memória.
+ */
+export async function builtinMemory(text: string): Promise<{ reply: string } | null> {
+  const t = strip(text);
+  if (!t || t.length > 200) return null;
+
+  // ——— Guardar nome do usuário ———
+  const nameM = t.match(
+    /^(?:meu nome e|meu nome é|eu me chamo|me chamo|pode me chamar de|sou o|sou a|me chamam de)\s+(.+)$/i,
+  );
+  if (nameM) {
+    const nome = strip(nameM[1]).replace(/[.,;!?]+$/, "");
+    if (nome && !/^(?:seu|voce|você|meu|me|ele|ela|isso|isto|que|o que|nao|não)\b/i.test(nome)) {
+      const first = nome.split(/\s+/)[0];
+      await remember("usuario: nome", first);
+      return { reply: `Guardei na memória. Prazer em te conhecer, ${first}!` };
+    }
+  }
+
+  // ——— Perguntar nome ———
+  if (
+    /^(?:qual(?:\s+(?:é|e))?\s+o\s+meu\s+nome|como\s+(?:eu\s+)?me\s+chamo|sabes?\s+(?:o\s+)?meu\s+nome|lembra\s+do\s+meu\s+nome|quem\s+eu\s+sou)\??$/i.test(t)
+  ) {
+    const nome = getUserName();
+    return { reply: nome ? `Seu nome é ${nome}.` : "Ainda não sei seu nome. Como você se chama?" };
+  }
+
+  // ——— Guardar contato (número de WhatsApp/telefone) ———
+  const contactM =
+    t.match(
+      /^(?:o|a)\s+(?:numero|número|contato|telefone|whatsapp|zap)\s+(?:do|da|de)\s+(.+?)\s+(?:é|e|eh)\s+([0-9()\s\-+]{8,})$/i,
+    ) ??
+    t.match(
+      /^(?:guarde|guarda|salve|salva|lembre|lembra|anota|anote)\s+(?:na\s+memoria\s+|na\s+memória\s+)?(?:o|a)?\s*(?:numero|número|contato|telefone|whatsapp|zap)?\s*(?:do|da|de)\s+(.+?)\s*(?:é|e|eh)?\s*([0-9()\s\-+]{8,})$/i,
+    );
+  if (contactM) {
+    const name = normalizeContactName(contactM[1]);
+    const num = (contactM[2] ?? "").replace(/\D/g, "");
+    if (name && num.length >= 8) {
+      await remember(`contato: ${name}`, num);
+      return { reply: `Guardei o contato ${name} na memória.` };
+    }
+  }
+
+  // ——— Guardar perfil (Instagram/rede social) ———
+  const profileM =
+    t.match(/^(?:salve|salva|guarde|guarda|lembre|lembra|anota|anote)\s+o\s+perfil\s+(?:do|da|de)\s+(.+)$/i) ??
+    t.match(/^(?:salve|salva|guarde|guarda|lembre|lembra|anota|anote)\s+o\s+instagram\s+(?:do|da|de)\s+(.+)$/i) ??
+    t.match(/^(?:salve|salva|guarde|guarda)\s+(?:o\s+)?@?([a-z0-9_.]+)\s+no\s+instagram$/i);
+  if (profileM) {
+    const user = (profileM[1] ?? "")
+      .trim()
+      .replace(/^@/, "")
+      .replace(/\s+no\s+instagram.*$/i, "")
+      .replace(/[^a-z0-9_.]/gi, "")
+      .toLowerCase();
+    if (user && user.length >= 2) {
+      await remember(`perfil: ${user}`, user);
+      return { reply: `Guardei o perfil @${user} na memória.` };
+    }
+  }
+
+  // ——— Guardar fato ———
+  const factM = t.match(
+    /^(?:guarde|guarda|salve|salva|lembre|lembra|anota|anote|memorize|memoriza)\s+(?:na\s+memoria\s+|na\s+memória\s+)?que\s+(.+)$/i,
+  );
+  if (factM) {
+    const fact = strip(factM[1]).replace(/[.,;!?]+$/, "");
+    if (fact.length > 3) {
+      await remember("fato", fact);
+      return { reply: "Guardei na memória." };
+    }
+  }
+
+  // ——— Esquecer ———
+  const forgetM =
+    t.match(/^(?:esqueça|esqueca|esquece|esquecis?)\s+(?:da\s+memoria\s+|de\s+)?(.+)$/i) ??
+    t.match(/^apague\s+da\s+memoria\s+(.+)$/i);
+  if (forgetM) {
+    const res = await forget(forgetM[1]);
+    return { reply: res.message };
+  }
+
+  // ——— Anotação (nota mais longa que tarefa/fato) ———
+  const noteM = t.match(
+    /^(?:anota|anote|escreve|escreva|registra|registre|faz|faça|fa\s+a)\s+(?:uma\s+)?anota[çc](?:[ãõ]es|ão|ações?)\s*:\s*(.+)$/i,
+  ) ?? t.match(/^anota\s+(?:aí|ai|isso)\s*:\s*(.+)$/i) ?? t.match(/^anota\s+(?:isso|isto|aí|ai)\s+(.+)$/i);
+  if (noteM) {
+    const nota = strip(noteM[1]).replace(/[.,;!?]+$/, "");
+    if (nota.length > 2) {
+      const res = await addNote(nota);
+      return { reply: res.message };
+    }
+  }
+
+  // ——— Listar anotações ———
+  if (
+    /^(?:quais|quais\s+minhas|o\s+que|oque)\s+(?:sao|são|sao as|são as)\s+minhas\s+anota[çc](?:[ãõ]es|ão)\b/i.test(t) ||
+    /^(?:mostre|mostra|liste|listar)\s+(?:minhas\s+|as\s+|a\s+)?anota[çc](?:[ãõ]es|ão)/i.test(t) ||
+    /^anota[çc](?:[ãõ]es|ão)\s+salvas$/i.test(t)
+  ) {
+    const notas = listNotes();
+    if (!notas.length) return { reply: "Você ainda não tem anotações salvas. Diga: anota uma anotação: texto." };
+    return { reply: `Suas anotações: ${notas.map((n, i) => `${i + 1}. ${n}`).join("; ")}.` };
+  }
+
+  // ——— Apagar anotação ———
+  const noteRm = t.match(
+    /^(?:apaga|apague|remove|remova|exclui|exclua|esquece|esqueça)\s+(?:a\s+|essa\s+|esta\s+|essa\s+minha\s+|a\s+minha\s+)?anota[çc](?:[ãõ]es|ão)\s+(.+)$/i,
+  );
+  if (noteRm) {
+    const res = await removeNote(noteRm[1]);
+    return { reply: res.message };
+  }
+
+  // ——— Listar o que lembra ———
+  if (
+    /^(?:o que|oque|o q|quais|quais\s+informacoes)\s+(?:voce|você)\s+(?:sabe|lembra)(?:\s+sobre\s+mim|\s+de\s+mim|\s+sobre\s+voce|\s+de\s+voce)?[\s?.!]*$/i.test(t) ||
+    /^(?:mostre|mostra|liste|listar)\s+(?:sua\s+|a\s+|as\s+)?(?:memoria|memorias|lembrancas)/i.test(norm(t))
+  ) {
+    return { reply: listMemoryText() };
+  }
+
+  return null;
+}
