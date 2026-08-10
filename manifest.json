@@ -1,52 +1,32 @@
 {
-  "versao": "20260809-212909",
+  "versao": "20260809-222321",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "app/api/sinal/route.ts",
-      "url": "arquivos/0cbfc006e640f52c08e90e5fd430d2bcd87483bc5e86eb28738350870dae399e",
-      "sha256": "0cbfc006e640f52c08e90e5fd430d2bcd87483bc5e86eb28738350870dae399e"
+      "caminho": "app/api/publish/route.ts",
+      "url": "arquivos/c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d",
+      "sha256": "c8fa1a34761f4a323f299c272288c002dbf65d874f5a625d81f781b1b9ebdd8d"
     },
     {
-      "caminho": "app/api/updates/route.ts",
-      "url": "arquivos/d06b657869f8818cd61da73dfe951a97dae1be73632447db30676f9b0b9cbd7c",
-      "sha256": "d06b657869f8818cd61da73dfe951a97dae1be73632447db30676f9b0b9cbd7c"
-    },
-    {
-      "caminho": "COMANDOS.md",
-      "url": "arquivos/e5851b8edd08c1cd1f3f81e39fe1ed184b486380a15821f6e9654827960581b7",
-      "sha256": "e5851b8edd08c1cd1f3f81e39fe1ed184b486380a15821f6e9654827960581b7"
+      "caminho": "app/globals.css",
+      "url": "arquivos/8aa1399a46ad6d86b352703527cdfdaa6e60c2162757d6a7f4f036871b21bc81",
+      "sha256": "8aa1399a46ad6d86b352703527cdfdaa6e60c2162757d6a7f4f036871b21bc81"
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/97f4cab72385f4da78f9bfa69b105afa9f5d633f4c8ee19106b4c5de8bd7ff1b",
-      "sha256": "97f4cab72385f4da78f9bfa69b105afa9f5d633f4c8ee19106b4c5de8bd7ff1b"
+      "url": "arquivos/c01cc31fd0db958e41249adc58ad11accba662eb258da3e125e821cdba75c8c6",
+      "sha256": "c01cc31fd0db958e41249adc58ad11accba662eb258da3e125e821cdba75c8c6"
     },
     {
-      "caminho": "lib/agent/identity.ts",
-      "url": "arquivos/cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa",
-      "sha256": "cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa"
+      "caminho": "lib/publicador.ts",
+      "url": "arquivos/99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296",
+      "sha256": "99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296"
     },
     {
-      "caminho": "lib/agent/mqtt.ts",
-      "url": "arquivos/a6f5828a5f06f346272e426d90247e430a2cc738642201ff25f4a4c34e82634c",
-      "sha256": "a6f5828a5f06f346272e426d90247e430a2cc738642201ff25f4a4c34e82634c"
-    },
-    {
-      "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e",
-      "sha256": "36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e"
-    },
-    {
-      "caminho": "lib/agent/sinal.ts",
-      "url": "arquivos/15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109",
-      "sha256": "15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109"
-    },
-    {
-      "caminho": "tsconfig.tsbuildinfo",
-      "url": "arquivos/135d145468c4de1c105cb0dfc2a29d361f15122f255387052efada37563a64ab",
-      "sha256": "135d145468c4de1c105cb0dfc2a29d361f15122f255387052efada37563a64ab"
+      "caminho": "scripts/publicar-atualizacao.ts",
+      "url": "arquivos/d4e742ea82be2fb0c8382f2f3716bc60cda65f3404d14448d091b37bb91a90f1",
+      "sha256": "d4e742ea82be2fb0c8382f2f3716bc60cda65f3404d14448d091b37bb91a90f1"
     }
   ]
 }
