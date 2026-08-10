@@ -1,10 +1,9 @@
 {
-  "versao": "20260810-103629",
+  "versao": "20260810-105411",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "Corre��o do painel REGISTRO DE A��ES: layout que cortava o FEEDBACK RECEBIDO e a �rea de sugest�es",
-    "Painel agora rola como um todo � nada mais fica espremido ou cortado quando chegam feedbacks"
+    "CORRE��O: feedbacks dos usu�rios agora chegam na �rea do dev � o painel estava com cache antigo e n�o relia o arquivo de feedback recebido"
   ],
   "arquivos": [
     {
@@ -164,8 +163,8 @@
     },
     {
       "caminho": "lib/agent/feedback.ts",
-      "url": "arquivos/bd3f3ada31d78f87a5541b30572f7ef920ebf1372c45f4cb4ac8871d033209f4",
-      "sha256": "bd3f3ada31d78f87a5541b30572f7ef920ebf1372c45f4cb4ac8871d033209f4"
+      "url": "arquivos/44e4af7ebd8f2438ed4f54f3d986675a5bbefcefba15558d67c2c37a22f2f31b",
+      "sha256": "44e4af7ebd8f2438ed4f54f3d986675a5bbefcefba15558d67c2c37a22f2f31b"
     },
     {
       "caminho": "lib/agent/finance.ts",
