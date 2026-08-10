@@ -1,12 +1,22 @@
 {
-  "versao": "20260809-222506",
+  "versao": "20260809-223449",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a",
-      "sha256": "2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a"
+      "caminho": "app/globals.css",
+      "url": "arquivos/6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b",
+      "sha256": "6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b"
+    },
+    {
+      "caminho": "lib/atualizador.ts",
+      "url": "arquivos/518a036bd9cf9ceb511afdb834dafbdb8d2397414e67e6928531d2d16e985917",
+      "sha256": "518a036bd9cf9ceb511afdb834dafbdb8d2397414e67e6928531d2d16e985917"
+    },
+    {
+      "caminho": "next-env.d.ts",
+      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
+      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
     }
   ]
 }
