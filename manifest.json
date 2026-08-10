@@ -1,10 +1,9 @@
 {
-  "versao": "20260810-164422",
+  "versao": "20260810-165146",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: correcao da criptografia - o AAD do AES-GCM no recebimento usava a fingerprint errada e descartava TODAS as mensagens em silencio (envio funcionava, chegada nao). Agora os dois lados computam o mesmo AAD e toda mensagem entrega.",
-    "Chat P2P: fim da corrida de canais - o connId agora e trocado pela sinalizacao (antes do canal existir), entao so um lado cria o canal na reconexao - sem loop de canais se fechando e sem perder mensagens."
+    "Chat P2P: presenca fresca ao abrir o chat - re-assina os contatos (o broker re-entrega o estado retido) e publica a propria presenca de novo, corrigindo status travado em offline quando a outra maquina reinicia."
   ],
   "arquivos": [
     {
@@ -139,8 +138,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/82c80dbf24d6b25d8d8486bf97db98ef4ebfdad4e32b69683a1314cd39c3b2f8",
-      "sha256": "82c80dbf24d6b25d8d8486bf97db98ef4ebfdad4e32b69683a1314cd39c3b2f8"
+      "url": "arquivos/4cd76b3c4d5adb35d2b321da32716f10ab5f90c2ce8bca0309e72a92b5a7a6fc",
+      "sha256": "4cd76b3c4d5adb35d2b321da32716f10ab5f90c2ce8bca0309e72a92b5a7a6fc"
     },
     {
       "caminho": "instrumentation.ts",
@@ -249,8 +248,8 @@
     },
     {
       "caminho": "lib/agent/sinal.ts",
-      "url": "arquivos/15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109",
-      "sha256": "15b97de525415d5678c47c33b48b48eaadb7ece7feb829802033d0193bb8b109"
+      "url": "arquivos/9371f5433de26a16aeaf0d7051bb1cdda42b0c2412917491fd2ed5a883faf134",
+      "sha256": "9371f5433de26a16aeaf0d7051bb1cdda42b0c2412917491fd2ed5a883faf134"
     },
     {
       "caminho": "lib/agent/tools.ts",
