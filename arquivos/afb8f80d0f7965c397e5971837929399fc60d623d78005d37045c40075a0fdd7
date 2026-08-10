@@ -1,0 +1,76 @@
+# Arthemis Orb UI
+
+An Iron Man–inspired holographic orb built with **Next.js** and **Three.js** — estritamente preto e branco, com rede de sinapses no núcleo.
+
+> 🔮 Assistente de voz em português (Arthemis) com IA local (Ollama) ou em nuvem (Ollama Cloud), voz neural feminina natural (edge-tts), autoridade total sobre o PC e acesso à internet e redes sociais.
+
+https://github.com/user-attachments/assets/91578a83-9a27-44e8-84b0-96defcfd7366
+
+## Getting started
+
+```bash
+npm install
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+## Controls
+
+### Mouse / touch
+
+| Input | Action |
+| --- | --- |
+| Drag | Spin the orb |
+| Scroll / pinch | Zoom in & out |
+
+### Keyboard
+
+| Key | Action |
+| --- | --- |
+| `V` | Toggle voice |
+| `R` | Reset the view |
+| `+` / `−` | Zoom in / out |
+
+## Arthemis CLI (vibe coding by terminal)
+
+Same Arthemis pipeline without the browser, voice or TTS — what you type is exactly
+what you would speak in the HUD:
+
+```bash
+npm run ares
+```
+
+```
+> define o projeto atual como C:/meu-projeto
+> cria um arquivo chamado src/app.ts com conteudo export const x = 1
+> leia o arquivo src/app.ts
+> troque export const por export let no arquivo src/app.ts
+```
+
+- With `KIWI_OLLAMA_API_KEY` set, the CLI uses **deepseek-v4-flash:cloud**;
+  otherwise `KIWI_CLOUD_URL/KEY/MODEL` (OpenAI-compatible) or the local
+  llama3.1 via Ollama.
+- `/ajuda` for CLI commands, `/sair` to exit.
+- Isolate its conversation history from the web app with
+  `ARES_CONVERSATION_FILE=/tmp/conv.json npm run ares`.
+
+## How it works
+
+- **`lib/orbScene.ts`** — the Three.js scene: outer particle shell, synapse
+  network core (particles.js-style), floating code-text sprites, dust particles
+  and a neutral black-and-white post-processing stack.
+- **`components/AresOrb.tsx`** — the HUD and glue between the scene, voice and
+  the assistant.
+- **`lib/agent/`** — the assistant core: built-in command engine (pt-BR),
+  Ollama local + Ollama Cloud fallback, and tools for files, programs,
+  WhatsApp, Instagram, other social networks, web search, and vibe coding
+  (current-project, read_file, edit_file).
+- **`scripts/ares-cli.ts`** — interactive terminal that drives the same
+  `processCommand` pipeline.
+- **`lib/voice.ts` + `app/api/tts/`** — natural neural voice (edge-tts)
+  generated server-side, with browser TTS as fallback.
+
+## License
+
+MIT
