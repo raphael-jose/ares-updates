@@ -1,0 +1,160 @@
+/**
+ * Cache de síntese de voz persistente (TTS).
+ *
+ * Duas camadas:
+ * - Memória (LRU, máx. 40): o áudio já tocado na sessão volta instantâneo;
+ * - Disco (~/.ares/tts-cache/, máx. 150): o mesmo texto, voz e velocidade
+ *   falado em outra sessão NÃO re-sintetiza — o Hermes carrega o índice no
+ *   boot e a primeira fala repetida já sai do disco (~ms em vez de 2–20s).
+ *
+ * Best-effort: falhas de disco nunca derrubam a síntese (o chamador só vê
+ * cache miss). Diretório sobrescrevível com ARES_TTS_CACHE_DIR (testes).
+ */
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+
+interface MemEntry {
+  data: Buffer;
+  contentType: string;
+  voice: string;
+  at: number;
+}
+
+interface DiskEntry {
+  file: string;
+  contentType: string;
+  voice: string;
+  at: number;
+}
+
+const MAX_MEM = 40;
+const MAX_DISK = 150;
+const DIR =
+  process.env.ARES_TTS_CACHE_DIR || path.join(os.homedir(), ".ares", "tts-cache");
+const INDEX_FILE = path.join(DIR, "index.json");
+
+let loaded = false;
+let loading: Promise<void> | null = null;
+/** LRU por ordem de inserção (Map): o mais antigo é o primeiro da iteração. */
+const mem = new Map<string, MemEntry>();
+const disk = new Map<string, DiskEntry>();
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Carrega o índice do disco (idempotente; o Hermes chama no boot). */
+export async function loadTtsCache(): Promise<void> {
+  if (loaded) return;
+  if (loading) return loading;
+  loading = (async () => {
+    try {
+      await fs.mkdir(DIR, { recursive: true });
+      const raw = await fs.readFile(INDEX_FILE, "utf8").catch(() => "");
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, DiskEntry>;
+        for (const [k, e] of Object.entries(parsed)) {
+          if (e && typeof e.file === "string") disk.set(k, e);
+        }
+      }
+    } catch {
+      /* índice corrompido: começa vazio (nunca derruba a síntese) */
+    }
+    loaded = true;
+    loading = null;
+  })();
+  return loading;
+}
+
+/** Contagem atual (memória + disco) — para o status do Hermes. */
+export function ttsCacheCount(): { memoria: number; disco: number } {
+  return { memoria: mem.size, disco: disk.size };
+}
+
+function memSet(key: string, data: Buffer, contentType: string, voice: string): void {
+  mem.delete(key);
+  mem.set(key, { data, contentType, voice, at: Date.now() });
+  while (mem.size > MAX_MEM) {
+    const oldest = mem.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    mem.delete(oldest);
+  }
+}
+
+function scheduleIndexSave(): void {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    void saveIndex();
+  }, 300);
+}
+
+async function saveIndex(): Promise<void> {
+  try {
+    const obj: Record<string, DiskEntry> = {};
+    for (const [k, e] of disk) obj[k] = e;
+    await fs.mkdir(DIR, { recursive: true });
+    await fs.writeFile(INDEX_FILE, JSON.stringify(obj));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Remove do disco as entradas mais antigas quando estoura o limite. */
+function trimDisk(): void {
+  if (disk.size <= MAX_DISK) return;
+  const sorted = [...disk.entries()].sort((a, b) => a[1].at - b[1].at);
+  const excedente = disk.size - MAX_DISK;
+  for (let i = 0; i < excedente; i++) {
+    const [k, e] = sorted[i];
+    disk.delete(k);
+    void fs.rm(path.join(DIR, e.file), { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Busca um áudio no cache (memória primeiro; disco com leitura lazy e
+ * promoção para a memória). Devolve null em cache miss.
+ */
+export async function ttsCacheGet(key: string): Promise<{
+  data: Buffer;
+  contentType: string;
+  voice: string;
+} | null> {
+  await loadTtsCache();
+  const m = mem.get(key);
+  if (m) {
+    memSet(key, m.data, m.contentType, m.voice); // refresh LRU
+    return { data: m.data, contentType: m.contentType, voice: m.voice };
+  }
+  const e = disk.get(key);
+  if (!e) return null;
+  try {
+    const data = await fs.readFile(path.join(DIR, e.file));
+    memSet(key, data, e.contentType, e.voice);
+    return { data, contentType: e.contentType, voice: e.voice };
+  } catch {
+    disk.delete(key); // arquivo sumiu: não insiste
+    return null;
+  }
+}
+
+/** Guarda um áudio no cache: memória na hora + persistência em disco (async). */
+export async function ttsCacheSet(
+  key: string,
+  data: Buffer,
+  contentType: string,
+  voice: string,
+): Promise<void> {
+  await loadTtsCache();
+  memSet(key, data, contentType, voice);
+  const ext = contentType === "audio/mpeg" ? "mp3" : "wav";
+  disk.set(key, { file: `${key}.${ext}`, contentType, voice, at: Date.now() });
+  trimDisk();
+  scheduleIndexSave();
+  void fs.writeFile(path.join(DIR, `${key}.${ext}`), data).catch(() => {});
+}
+
+/** Poda explícita do cache em disco (chamada pelo Hermes na varredura). */
+export function ttsCacheTrim(): void {
+  trimDisk();
+  if (!saveTimer) scheduleIndexSave();
+}
