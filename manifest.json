@@ -1,7 +1,12 @@
 {
-  "versao": "20260810-184413",
+  "versao": "20260810-190314",
   "npm": false,
   "exigeReinicio": true,
+  "notas": [
+    "Chat simplificado: adicionou o ID e conectou — sem verificação manual nem desbloqueio de identidade.",
+    "Status dos contatos agora vem da presença real (heartbeat a cada 30s) — o amigo não fica mais travado em \"offline\" estando online.",
+    "Criar identidade agora é só nome + tag (ex.: Raphael + 966 → RAPHAEL#966), sem senha."
+  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
@@ -135,8 +140,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/8f5d43201cce92f1f1c705793272bcd75a12442cd1d80eeef65e9d01ab1514a9",
-      "sha256": "8f5d43201cce92f1f1c705793272bcd75a12442cd1d80eeef65e9d01ab1514a9"
+      "url": "arquivos/2e6a08d1c41a05688f70baa1515da032ff56a6397ae6f1516b6ae71bc8701b39",
+      "sha256": "2e6a08d1c41a05688f70baa1515da032ff56a6397ae6f1516b6ae71bc8701b39"
     },
     {
       "caminho": "instrumentation.ts",
@@ -245,8 +250,8 @@
     },
     {
       "caminho": "lib/agent/sinal.ts",
-      "url": "arquivos/9371f5433de26a16aeaf0d7051bb1cdda42b0c2412917491fd2ed5a883faf134",
-      "sha256": "9371f5433de26a16aeaf0d7051bb1cdda42b0c2412917491fd2ed5a883faf134"
+      "url": "arquivos/1f9c02dc64edc2c8837d3e5b50cf9f1125d72dcbe33d6f7f00bb2d05a0daa73a",
+      "sha256": "1f9c02dc64edc2c8837d3e5b50cf9f1125d72dcbe33d6f7f00bb2d05a0daa73a"
     },
     {
       "caminho": "lib/agent/tools.ts",
