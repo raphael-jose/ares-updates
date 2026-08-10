@@ -1,0 +1,39 @@
+/**
+ * Hermes: inicia o daemon de velocidade em segundo plano quando o servidor sobe.
+ * Roda oculto — nunca bloqueia o boot e nunca derruba o servidor.
+ */
+export async function register(): Promise<void> {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    try {
+      const { startHermes } = await import("./lib/agent/hermes");
+      startHermes();
+    } catch {
+      /* se o aquecimento falhar, o servidor segue normal */
+    }
+    try {
+      // Atualizador automático: checa o manifest remoto periodicamente e
+      // instala sozinho (a IA avisa em voz quando há atualização).
+      const { iniciarAtualizador } = await import("./lib/atualizador");
+      iniciarAtualizador();
+    } catch {
+      /* atualizador é best-effort — nunca derruba o boot */
+    }
+    try {
+      // Telemetria de erros: envia falhas ao broker (dev recebe) e, na
+      // máquina do dev, assina e injeta erros remotos na área de erros.
+      const { ativarTelemetriaErros } = await import("./lib/agent/erros");
+      ativarTelemetriaErros();
+    } catch {
+      /* telemetria é best-effort — nunca derruba o boot */
+    }
+    try {
+      // Checagem de raiz: detecta package-lock.json órfão em pasta pai (o
+      // Turbopack escolheria a raiz errada → 404). Preaquece o cache para o
+      // /api/raiz responder na hora.
+      const { checarRaiz } = await import("./lib/raizCheck");
+      checarRaiz();
+    } catch {
+      /* checagem é best-effort — nunca derruba o boot */
+    }
+  }
+}
