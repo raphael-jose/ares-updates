@@ -1,11 +1,7 @@
 {
-  "versao": "20260810-180732",
+  "versao": "20260810-184413",
   "npm": false,
-  "exigeReinicio": false,
-  "notas": [
-    "Performance: o orbe não renderiza mais com a janela minimizada ou escondida — economiza GPU/CPU (ótimo para hardware fraco) e elimina os avisos de erro do WebGL",
-    "Verificação completa das funcionalidades: chat P2P, voz, agenda, finanças, configurações, memória e feedback — tudo conferido e funcionando"
-  ],
+  "exigeReinicio": true,
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
