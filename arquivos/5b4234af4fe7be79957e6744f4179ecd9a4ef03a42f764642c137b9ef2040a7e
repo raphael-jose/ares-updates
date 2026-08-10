@@ -1,0 +1,64 @@
+@echo off
+setlocal
+title Arthemis Launcher
+cd /d "%~dp0"
+
+rem ============================================================
+rem  ARTHEMIS — launcher leve
+rem  - instala Python/Node se faltarem (winget, silencioso)
+rem  - instala dependencias do projeto na primeira vez
+rem  - abre a janela de loading (loading.py) e o servidor em 2o plano
+rem  - a janela de loading abre o navegador quando o servidor sobe
+rem ============================================================
+
+if not exist ".freebuff" mkdir ".freebuff"
+set "STATUS=.freebuff\loading-status.txt"
+
+> "%STATUS%" echo Verificando ambiente...
+
+rem ---------- Python (precisa para a janela de loading) ----------
+where python >nul 2>nul
+if errorlevel 1 (
+    > "%STATUS%" echo Instalando Python...
+    winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements >nul 2>nul
+    where python >nul 2>nul
+    if errorlevel 1 (
+        > "%STATUS%" echo Python nao encontrado - baixe em python.org e rode de novo.
+        start "" https://www.python.org/downloads/
+        pause
+        exit /b 1
+    )
+)
+
+rem ---------- Node.js ----------
+where node >nul 2>nul
+if errorlevel 1 (
+    > "%STATUS%" echo Instalando Node.js...
+    winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements >nul 2>nul
+    where node >nul 2>nul
+    if errorlevel 1 (
+        > "%STATUS%" echo Node.js nao encontrado - baixe em nodejs.org e rode de novo.
+        start "" https://nodejs.org/
+        pause
+        exit /b 1
+    )
+)
+
+rem ---------- dependencias do projeto (primeira vez) ----------
+if not exist "node_modules" (
+    > "%STATUS%" echo Instalando dependencias (primeira vez - pode demorar)...
+    call npm install --no-audit --no-fund
+    if errorlevel 1 (
+        > "%STATUS%" echo Falha no npm install - veja o terminal.
+        pause
+        exit /b 1
+    )
+)
+
+> "%STATUS%" echo Subindo o servidor...
+
+rem ---------- janela de loading + servidor em segundo plano ----------
+start "Arthemis Loading" pythonw loading.py --port 3000 --status "%STATUS%"
+start "Arthemis Server" /min cmd /c "set PORT=3000 && npx next dev -p 3000 -H 127.0.0.1 > .freebuff\server.log 2>&1"
+
+exit /b 0
