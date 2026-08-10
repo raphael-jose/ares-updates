@@ -1,0 +1,117 @@
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import os from "os";
+
+/**
+ * "Projeto atual" — o diretório de trabalho do modo coding (vibe coding).
+ * Persistido em ~/.ares/current-project.json para sobreviver a reinícios.
+ * Caminhos relativos de read_file/edit_file (e do cwd de run_command) são
+ * resolvidos dentro deste projeto quando definido.
+ */
+
+const HOME = os.homedir();
+// Override por env para testes (mesmo padrão do conversation.ts)
+const PROJECT_FILE =
+  process.env.ARES_PROJECT_FILE ?? path.join(HOME, ".ares", "current-project.json");
+
+const PLACE_ALIASES: Record<string, string> = {
+  "~": HOME,
+  casa: HOME,
+  home: HOME,
+  "area de trabalho": path.join(HOME, "Desktop"),
+  desktop: path.join(HOME, "Desktop"),
+  documentos: path.join(HOME, "Documents"),
+  downloads: path.join(HOME, "Downloads"),
+  imagens: path.join(HOME, "Pictures"),
+  músicas: path.join(HOME, "Music"),
+  musicas: path.join(HOME, "Music"),
+  vídeos: path.join(HOME, "Videos"),
+  videos: path.join(HOME, "Videos"),
+  projetos: path.join(HOME, "Projects"),
+};
+
+let cache: string | null = null;
+
+function ensureLoaded(): string {
+  if (cache !== null) return cache;
+  try {
+    const raw = fs.readFileSync(PROJECT_FILE, "utf8");
+    const parsed = JSON.parse(raw) as { path?: unknown };
+    if (parsed.path && typeof parsed.path === "string") {
+      cache = path.normalize(parsed.path);
+    }
+  } catch {
+    /* sem projeto salvo ainda */
+  }
+  if (cache === null) cache = "";
+  return cache;
+}
+
+async function persist(): Promise<void> {
+  try {
+    await fsp.mkdir(path.dirname(PROJECT_FILE), { recursive: true });
+    await fsp.writeFile(
+      PROJECT_FILE,
+      JSON.stringify({ path: cache ?? "" }, null, 2),
+      "utf8",
+    );
+  } catch {
+    /* persistência falhou: segue em memória */
+  }
+}
+
+/** Caminho absoluto do projeto atual ("" se não definido). */
+export function getCurrentProject(): string {
+  return ensureLoaded();
+}
+
+/** Define o projeto atual a partir de um caminho digitado (deve ser uma pasta existente). */
+export async function setCurrentProject(
+  raw: string,
+): Promise<{ ok: boolean; message: string }> {
+  const p = resolveProjectPath(raw);
+  try {
+    const st = await fsp.stat(p);
+    if (!st.isDirectory()) {
+      return { ok: false, message: `${p} não é uma pasta.` };
+    }
+  } catch {
+    return { ok: false, message: `A pasta ${p} não existe.` };
+  }
+  cache = p;
+  await persist();
+  return { ok: true, message: `Projeto atual definido: ${p}` };
+}
+
+/** Remove o projeto atual (volta a resolver relativo à pasta do usuário). */
+export async function clearCurrentProject(): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  cache = "";
+  await persist();
+  return {
+    ok: true,
+    message: "Projeto atual removido. Agora resolvo caminhos a partir da sua pasta.",
+  };
+}
+
+/**
+ * Resolve um caminho: absoluto e ~ seguem as regras normais; relativo parte do
+ * projeto atual quando definido (senão, da pasta do usuário).
+ */
+export function resolveProjectPath(raw: string): string {
+  const input = (raw ?? "").trim();
+  const proj = ensureLoaded();
+  if (!input) return proj || HOME;
+  const alias = PLACE_ALIASES[input.toLowerCase()];
+  if (alias) return alias;
+  if (/^[A-Za-z]:[\\/]/.test(input)) return path.normalize(input);
+  // Raiz de drive sem barra ("C:") deve virar a raiz absoluta C:/ — senão vira
+  // um caminho relativo ao projeto atual (ex.: test-tmp/meu-projeto/C:).
+  if (/^[A-Za-z]:$/.test(input)) return path.normalize(`${input}/`);
+  if (input.startsWith("~")) return path.join(HOME, input.slice(1));
+  if (proj) return path.normalize(path.join(proj, input));
+  return path.normalize(path.join(HOME, input));
+}
