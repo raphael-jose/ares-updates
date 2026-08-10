@@ -1,0 +1,263 @@
+import { builtinMemory, builtinParse } from "./builtin";
+import { confirmPendingAsync, confirmRoutineAsync, handleTool } from "./executor";
+import { routineCommand } from "./routines";
+import { askOllama, askCloud, type HistoryTurn } from "./llm";
+import {
+  appendTurn,
+  clearConversation,
+  getConversationTurns,
+} from "./conversation";
+import {
+  clearCurrentProject,
+  getCurrentProject,
+  setCurrentProject,
+} from "./project";
+import type { AgentResult, LogEntry, ToolCall, ToolName } from "./types";
+
+function resultForCall(call: ToolCall): Promise<AgentResult> {
+  return handleTool(call).then(({ reply, log, confirmation }) => {
+    if (confirmation) {
+      return { reply, needsConfirmation: confirmation };
+    }
+    return { reply, log };
+  });
+}
+
+/** Extrai a linha \"Sugestão: ...\" do final da resposta e devolve fala limpa + sugestão. */
+export function extractSuggestion(raw: string): { reply: string; sugestoes: string[] } {
+  const sugestoes: string[] = [];
+  let reply = (raw ?? "").trim();
+  const m = reply.match(/^Sugest[aã]o:\s*(.+)$/im);
+  if (m) {
+    const s = m[1].trim().replace(/[.!]+$/, "").trim();
+    if (s && s.length <= 120) sugestoes.push(s);
+    reply = reply.replace(/^Sugest[aã]o:\s*.+$/im, "").trim();
+  }
+  if (!reply) reply = raw ?? "";
+  return { reply, sugestoes };
+}
+
+/** Sugestão relevante para comandos resolvidos por ferramenta (sem LLM). */
+const TOOL_SUGGESTIONS: Partial<Record<ToolName, string>> = {
+  create_folder: "Quer que eu crie algo dentro dessa pasta?",
+  create_file: "Quer que eu crie mais algum arquivo?",
+  create_project: "Quer que eu adicione mais arquivos ao projeto?",
+  read_file: "Quer que eu edite algo nesse arquivo?",
+  edit_file: "Quer que eu edite mais alguma coisa nesse arquivo?",
+  list_folder: "Quer que eu abra alguma pasta da lista?",
+  open_folder: "Quer que eu liste o que tem dentro?",
+  delete_path: "Quer que eu apague mais alguma coisa?",
+  rename_path: "Quer renomear mais algum arquivo?",
+  web_search: "Quer que eu pesquise mais alguma coisa?",
+  show_image: "Quer ver outra imagem?",
+  fetch_url: "Quer que eu leia outra página também?",
+  open_url: "Quer abrir mais algum site?",
+  open_program: "Quer que eu abra outro programa?",
+  send_whatsapp: "Quer mandar mais alguma mensagem?",
+  whatsapp_read: "Quer que eu leia suas conversas do WhatsApp?",
+  open_instagram: "Quer ver o perfil de mais alguém no Instagram?",
+  social_search: "Quer pesquisar em outra rede social?",
+  weather: "Quer saber a previsão para amanhã também?",
+  currency: "Quer converter outro valor?",
+  crypto: "Quer a cotação de outra criptomoeda?",
+  country: "Quer saber sobre outro país?",
+  joke: "Quer ouvir outra piada?",
+  remember: "Quer que eu guarde mais alguma coisa?",
+  forget: "Quer que eu esqueça mais alguma coisa?",
+  add_task: "Quer anotar mais alguma tarefa?",
+  remove_task: "Quer remover mais alguma tarefa?",
+  list_tasks: "Quer que eu anote alguma tarefa?",
+  add_agenda: "Quer marcar mais algum compromisso na agenda?",
+  remove_agenda: "Quer remover mais algum compromisso?",
+  list_agenda: "Quer que eu marque algum compromisso na agenda?",
+  convert_units: "Quer converter outra medida?",
+  take_screenshot: "Quer que eu tire outro print?",
+  screen_read: "Quer que eu clique em algo que está na tela?",
+  screen_click: "Quer que eu faça mais alguma coisa na tela?",
+  window_control: "Quer controlar outra janela?",
+  list_windows: "Quer que eu alterne para alguma dessas janelas?",
+};
+
+function withToolSuggestion(result: AgentResult, call: ToolCall): AgentResult {
+  if (result.sugestoes && result.sugestoes.length) return result;
+  const sug = TOOL_SUGGESTIONS[call.tool];
+  return sug ? { ...result, sugestoes: [sug] } : result;
+}
+
+/** Comando de voz: apagar o histórico da conversa (\"limpa a conversa\"). */
+function clearConversationCommand(text: string): boolean {
+  return /^(?:limpa|limpe|limpar|apaga|apague|apagar|esquece|esqueça|esqueca|zera|zerar|reseta|resetar|recomeça|recomeçar)\s+(?:a\s+|toda\s+a\s+)?(?:conversa|historico|histórico|conversação|conversacao)$/i.test(
+    text.trim(),
+  );
+}
+
+/** Comando de voz: definir/consultar/limpar o \"projeto atual\" (modo coding). */
+async function projectCommand(text: string): Promise<AgentResult | null> {
+  // Normaliza: corta pontuação final ("qual é o projeto atual?" → "qual é o projeto atual")
+  const t = (text ?? "").trim().replace(/[.,;!?]+$/, "");
+
+  // "atual" é opcional: "define o projeto atual como X" ou "usa o projeto X"
+  const define =
+    t.match(
+      /^(?:define|defina|seta|sete|muda|mude|troca|troque|marca|marque|usa|use)\s+(?:o\s+)?(?:projeto|workspace)\s+(?:atual\s+)?(?:como\s+|em\s+|para\s+|pra\s+)?(.+)$/i,
+    ) ?? t.match(/^define\s+o\s+projeto\s+(.+)$/i);
+  if (define) {
+    const alvo = define[1].trim().replace(/[.,;!?]+$/, "");
+    if (alvo && alvo.length <= 200) {
+      const res = await setCurrentProject(alvo);
+      return { reply: res.message };
+    }
+  }
+
+  if (
+    /^(?:qual(?: é| e)?\s+(?:é|e|o)\s+projeto\s+atual|onde\s+fica\s+o\s+projeto\s+atual|qual\s+o\s+projeto)$/i.test(
+      t,
+    )
+  ) {
+    const proj = getCurrentProject();
+    return {
+      reply: proj
+        ? `O projeto atual é ${proj}.`
+        : "Ainda não defini um projeto atual. Diga: define o projeto atual como C:/minha/pasta.",
+    };
+  }
+
+  if (
+    /^(?:sai\s+do|limpa\s+o|remove\s+o|apaga\s+o|cancela\s+o|desfaz\s+o)\s+projeto\s+atual$/i.test(
+      t,
+    )
+  ) {
+    const res = await clearCurrentProject();
+    return { reply: res.message };
+  }
+
+  return null;
+}
+
+/**
+ * Caminho de decisão:
+ * 1. Comando de limpar histórico.
+ * 2. Assistente embutido (rápido, reconhece comandos comuns em PT-BR).
+ * 3. Ollama local (LLM com chamada de ferramentas) + histórico da conversa.
+ * 4. Modelo em nuvem opcional (env: KIWI_CLOUD_URL/KIWI_CLOUD_KEY/KIWI_CLOUD_MODEL).
+ * 5. Resposta genérica.
+ *
+ * Todo turno (pergunta + resposta) é gravado no histórico de longo prazo.
+ */
+export async function processCommand(text: string, humor?: string): Promise<AgentResult> {
+  const t = (text ?? "").trim();
+  if (!t) return { reply: "Não recebi nenhum comando." };
+
+  if (clearConversationCommand(t)) {
+    clearConversation();
+    const reply = "Ok, apaguei o histórico da nossa conversa. Pode recomeçar.";
+    appendTurn("user", t);
+    appendTurn("assistant", reply);
+    return { reply };
+  }
+
+  const project = await projectCommand(t);
+  if (project) {
+    appendTurn("user", t);
+    appendTurn("assistant", project.reply);
+    return project;
+  }
+
+  // Rotinas por voz: "boa noite" / "bom dia" / "executa a rotina X" — sempre
+  // com confirmação (needsConfirmation) antes de executar a sequência.
+  const routine = await routineCommand(t);
+  if (routine) {
+    appendTurn("user", t);
+    appendTurn("assistant", routine.reply);
+    return routine;
+  }
+
+  const memory = await builtinMemory(t);
+  if (memory) {
+    const result: AgentResult = { reply: memory.reply };
+    appendTurn("user", t);
+    appendTurn("assistant", memory.reply);
+    return result;
+  }
+
+  const builtin = builtinParse(t);
+  if (builtin) {
+    if (builtin.kind === "say") {
+      const result: AgentResult = { reply: builtin.text ?? "Olá!" };
+      appendTurn("user", t);
+      appendTurn("assistant", result.reply);
+      return result;
+    }
+    if (builtin.call) {
+      const result = await resultForCall(builtin.call);
+      appendTurn("user", t);
+      appendTurn("assistant", result.reply);
+      return withToolSuggestion(result, builtin.call);
+    }
+  }
+
+  const history: HistoryTurn[] = getConversationTurns().map((h) => ({
+    role: h.role,
+    content: h.content,
+  }));
+  const llm = (await askOllama(t, history, humor)) ?? (await askCloud(t, history, humor));
+  if (llm) {
+    if (llm.toolCalls && llm.toolCalls.length > 0) {
+      // Executa TODAS as chamadas em sequência (ex.: screen_read + screen_click)
+      let text = llm.text ?? "";
+      let log: LogEntry | undefined;
+      for (const call of llm.toolCalls) {
+        const result = await resultForCall(call);
+        // Quando a ação precisa de confirmação, fale só a pergunta (sem juntar texto do modelo)
+        if (result.needsConfirmation) {
+          appendTurn("user", t);
+          appendTurn("assistant", result.reply);
+          return { reply: result.reply, needsConfirmation: result.needsConfirmation };
+        }
+        text = `${text} ${result.reply}`.trim();
+        if (result.log) log = result.log;
+      }
+      const { reply, sugestoes } = extractSuggestion(text);
+      let result: AgentResult = {
+        reply,
+        ...(sugestoes.length ? { sugestoes } : {}),
+        ...(log ? { log } : {}),
+      };
+      // Modelo chamou ferramenta sem texto (ex.: só a cotação): cobre o
+      // "sempre me sugira" com a sugestão heurística da ferramenta final.
+      if (!sugestoes.length && llm.toolCalls.length > 0) {
+        result = withToolSuggestion(result, llm.toolCalls[llm.toolCalls.length - 1]);
+      }
+      appendTurn("user", t);
+      appendTurn("assistant", reply);
+      return result;
+    }
+    if (llm.text) {
+      const { reply, sugestoes } = extractSuggestion(llm.text);
+      appendTurn("user", t);
+      appendTurn("assistant", reply);
+      return { reply, ...(sugestoes.length ? { sugestoes } : {}) };
+    }
+  }
+
+  const reply =
+    "Não entendi. Diga por exemplo: criar pasta chamada projetos, criar arquivo notas ponto txt, ou pesquisar na internet o que é JavaScript.";
+  appendTurn("user", t);
+  appendTurn("assistant", reply);
+  return { reply };
+}
+
+export async function confirmCommand(token: string): Promise<AgentResult> {
+  // Rotinas têm token prefixado com "rot-" (vários passos, vários logs).
+  if (token.startsWith("rot-")) {
+    const res = await confirmRoutineAsync(token);
+    if (res.reply) appendTurn("assistant", res.reply);
+    if (res.logs && res.logs.length > 0) {
+      return { reply: res.reply, logs: res.logs };
+    }
+    return { reply: res.reply };
+  }
+  const res = await confirmPendingAsync(token);
+  if (res.log || res.reply) appendTurn("assistant", res.reply);
+  return res;
+}
