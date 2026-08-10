@@ -1,0 +1,9 @@
+import { NextResponse } from "next/server";
+import { checarRaiz } from "@/lib/raizCheck";
+
+export const runtime = "nodejs";
+
+/** Checagem de raiz do Turbopack: detecta package-lock.json órfão em pastas pais. */
+export async function GET() {
+  return NextResponse.json(checarRaiz());
+}
