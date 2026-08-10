@@ -1,0 +1,380 @@
+/**
+ * Atualizador automático do ARES.
+ *
+ * O projeto distribui atualizações por um URL estático (GitHub Pages,
+ * Netlify, um VPS com nginx — qualquer host que sirva arquivos). Cada
+ * instalação verifica `${ARES_UPDATE_URL}/manifest.json` periodicamente;
+ * quando há versão nova, baixa os arquivos alterados, confere o SHA-256 de
+ * cada um e aplica em cima do projeto, preservando `.env`, `.freebuff/`,
+ * `node_modules/`, `.next/` e dados. Se o manifest pedir, roda `npm install`
+ * e/ou reinicia o servidor. A IA avisa em voz ("Recebendo atualização…")
+ * pelo cliente, que lê o estado via `/api/updates/status`.
+ *
+ * Sem `ARES_UPDATE_URL` no `.env`, o sistema fica desligado (estado
+ * "ocioso") e nada é baixado. O URL configurado é a âncora de confiança:
+ * ele define quem pode instalar código na máquina — configure apenas hosts
+ * que você controla.
+ */
+
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  copyFileSync,
+  rmSync,
+  readdirSync,
+} from "node:fs";
+import { join, resolve, sep } from "node:path";
+
+const DIR = join(process.cwd(), ".ares-update");
+const ARQUIVO_ESTADO = join(DIR, "estado.json");
+const STAGING = join(DIR, "staging");
+
+/** Prefixos de caminho que a atualização NUNCA toca. */
+const PROTEGIDOS = [
+  ".env",
+  ".freebuff",
+  ".ares-update",
+  "node_modules",
+  ".next",
+  ".git",
+  "data",
+  "dist-atualizacao",
+];
+
+export type FaseAtualizacao =
+  | "ocioso"
+  | "baixando"
+  | "aplicando"
+  | "aplicado"
+  | "reiniciando"
+  | "erro";
+
+export interface EstadoAtualizacao {
+  fase: FaseAtualizacao;
+  versaoAplicada: string;
+  versaoAlvo: string;
+  baixado: number;
+  total: number;
+  mensagem: string;
+  atualizadoEm?: number;
+  /** Reinício do servidor solicitado (o cliente recarrega a página). */
+  reiniciando?: boolean;
+  /** Notas de versão (changelog) da atualização aplicada. */
+  notas?: string[];
+}
+
+interface ArquivoManifest {
+  caminho: string;
+  url: string;
+  sha256: string;
+}
+
+interface Manifest {
+  versao: string;
+  npm?: boolean;
+  exigeReinicio?: boolean;
+  notas?: string[];
+  arquivos: ArquivoManifest[];
+}
+
+// ——— Estado persistido ———
+let emAndamento = false;
+let ultimaVerificacao = 0;
+
+function estadoPadrao(): EstadoAtualizacao {
+  return {
+    fase: "ocioso",
+    versaoAplicada: "0",
+    versaoAlvo: "",
+    baixado: 0,
+    total: 0,
+    mensagem: "Sem atualizações pendentes.",
+  };
+}
+
+export function estadoAtualizacao(): EstadoAtualizacao {
+  try {
+    if (!existsSync(ARQUIVO_ESTADO)) return estadoPadrao();
+    const e = JSON.parse(readFileSync(ARQUIVO_ESTADO, "utf-8")) as EstadoAtualizacao;
+    return { ...estadoPadrao(), ...e };
+  } catch {
+    return estadoPadrao();
+  }
+}
+
+function salvarEstado(e: EstadoAtualizacao): void {
+  try {
+    mkdirSync(DIR, { recursive: true });
+    writeFileSync(ARQUIVO_ESTADO, JSON.stringify(e, null, 2), "utf-8");
+  } catch {
+    /* estado é best-effort */
+  }
+}
+
+function baseUrl(): string {
+  return (process.env.ARES_UPDATE_URL || "").trim().replace(/\/+$/, "");
+}
+
+function intervaloMin(): number {
+  const v = Number(process.env.ARES_UPDATE_INTERVAL_MIN);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+// ——— Segurança de caminhos ———
+function caminhoSeguro(rel: string): string | null {
+  const alvo = resolve(process.cwd(), rel);
+  const raiz = resolve(process.cwd());
+  if (alvo !== raiz && !alvo.startsWith(raiz + sep)) return null; // fora do projeto
+  const normal = rel.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  for (const p of PROTEGIDOS) {
+    if (normal === p || normal.startsWith(p + "/")) return null;
+  }
+  if (normal.includes("..")) return null;
+  return normal;
+}
+
+// ——— Aplicação ———
+async function baixarEAplicar(m: Manifest): Promise<void> {
+  const base = baseUrl();
+  emAndamento = true;
+  try {
+    const st: EstadoAtualizacao = {
+      ...estadoAtualizacao(),
+      fase: "baixando",
+      versaoAlvo: m.versao,
+      baixado: 0,
+      total: m.arquivos.length,
+      mensagem: `Baixando atualização ${m.versao}…`,
+    };
+    salvarEstado(st);
+
+    // 1) Baixa TUDO para o staging e confere SHA-256 antes de tocar o projeto.
+    // O manifest é cumulativo (lista o projeto inteiro); arquivos cujo SHA-256
+    // local já confere são pulados — a atualização só baixa o que mudou de fato.
+    mkdirSync(STAGING, { recursive: true });
+    const baixados: { caminho: string; hash: string }[] = [];
+    for (const arq of m.arquivos) {
+      const caminho = caminhoSeguro(arq.caminho);
+      if (!caminho) {
+        throw new Error(`Caminho recusado pelo manifest: ${arq.caminho}`);
+      }
+      const destinoAtual = join(process.cwd(), caminho);
+      if (existsSync(destinoAtual)) {
+        try {
+          const local = createHash("sha256").update(readFileSync(destinoAtual)).digest("hex");
+          if (local === arq.sha256.toLowerCase()) continue; // já está igual — pula
+        } catch {
+          /* segue para baixar */
+        }
+      }
+      const res = await fetch(`${base}/${arq.url}`, { cache: "no-store" });
+      if (!res.ok) {
+        throw new Error(`Falha ao baixar ${arq.caminho} (HTTP ${res.status}).`);
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      const hash = createHash("sha256").update(buf).digest("hex");
+      if (hash !== arq.sha256.toLowerCase()) {
+        throw new Error(`SHA-256 não confere em ${arq.caminho} — atualização recusada.`);
+      }
+      writeFileSync(join(STAGING, hash), buf);
+      baixados.push({ caminho, hash });
+      st.baixado = baixados.length;
+      st.mensagem = `Baixando atualização ${m.versao}… (${baixados.length}/${m.arquivos.length})`;
+      salvarEstado(st);
+    }
+
+    if (baixados.length === 0) {
+      st.fase = "aplicado";
+      st.versaoAplicada = m.versao;
+      st.atualizadoEm = Date.now();
+      st.mensagem = `Atualização ${m.versao} instalada (nada a baixar).`;
+      st.reiniciando = Boolean(m.exigeReinicio);
+      st.notas = m.notas ?? [];
+      salvarEstado(st);
+      return;
+    }
+
+    // 2) Aplica (copia os arquivos verificados para o projeto).
+    st.fase = "aplicando";
+    st.mensagem = `Instalando atualização ${m.versao}…`;
+    salvarEstado(st);
+    for (const { caminho, hash } of baixados) {
+      const destino = join(process.cwd(), caminho);
+      mkdirSync(resolve(destino, ".."), { recursive: true });
+      copyFileSync(join(STAGING, hash), destino);
+    }
+
+    // 3) npm install se o manifest pedir (novas dependências).
+    if (m.npm) {
+      st.mensagem = "Instalando novas dependências…";
+      salvarEstado(st);
+      await rodarNpmInstall();
+    }
+
+    // 4) Registra a versão aplicada.
+    st.fase = "aplicado";
+    st.versaoAplicada = m.versao;
+    st.atualizadoEm = Date.now();
+    st.mensagem = `Atualização ${m.versao} instalada.`;
+    st.reiniciando = Boolean(m.exigeReinicio);
+    st.notas = m.notas ?? [];
+    salvarEstado(st);
+
+    // 5) Reinício se preciso (ex.: mudou package.json/next.config).
+    if (m.exigeReinicio) {
+      agendarReinicio();
+    }
+  } catch (e) {
+    const erro = e instanceof Error ? e.message : String(e);
+    salvarEstado({ ...estadoAtualizacao(), fase: "erro", mensagem: erro });
+  } finally {
+    emAndamento = false;
+    try {
+      rmSync(STAGING, { recursive: true, force: true });
+    } catch {
+      /* staging é descartável */
+    }
+  }
+}
+
+function rodarNpmInstall(): Promise<void> {
+  return new Promise((resolveOk, rejectOk) => {
+    const p = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "--no-fund", "--no-audit"], {
+      cwd: process.cwd(),
+      stdio: "ignore",
+      shell: false,
+    });
+    p.on("error", (err) => rejectOk(new Error(`npm install falhou: ${err.message}`)));
+    p.on("close", (code) => {
+      if (code === 0) resolveOk();
+      else rejectOk(new Error(`npm install terminou com código ${code}.`));
+    });
+  });
+}
+
+/**
+ * Reinicia o servidor: escreve um script que espera a porta liberar e sobe o
+ * `next dev` de novo (mesma janela minimizada do arthemis.bat), dispara ele
+ * destacado e encerra o processo atual.
+ */
+function agendarReinicio(): void {
+  try {
+    const porta = process.env.PORT || "3000";
+    const raiz = process.cwd();
+    const script = [
+      "@echo off",
+      `cd /d "${raiz}"`,
+      ":loop",
+      `curl -s -o nul --max-time 2 http://127.0.0.1:${porta}/ >nul 2>&1`,
+      "if not errorlevel 1 (",
+      "  ping -n 3 127.0.0.1 >nul",
+      "  goto loop",
+      ")",
+      `start "ARTHEMIS - SERVIDOR (feche para parar)" /min cmd /k "set PORT=${porta}&& npx next dev -p ${porta} -H 127.0.0.1 1>> .freebuff\\arthemis-server.log 2>&1"`,
+    ].join("\r\n");
+    const arquivo = join(raiz, ".freebuff", "reiniciar-atualizacao.cmd");
+    mkdirSync(join(raiz, ".freebuff"), { recursive: true });
+    writeFileSync(arquivo, script, "utf-8");
+    spawn("cmd", ["/c", "start", "", "/min", arquivo], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    }).unref();
+    const st = estadoAtualizacao();
+    st.fase = "reiniciando";
+    st.mensagem = "Reiniciando o servidor para aplicar a atualização…";
+    salvarEstado(st);
+    setTimeout(() => process.exit(0), 1500);
+  } catch {
+    /* se o reinício falhar, o servidor segue e a atualização vale no próximo boot */
+  }
+}
+
+// ——— Verificação ———
+export async function verificarAgora(): Promise<EstadoAtualizacao> {
+  const base = baseUrl();
+  let stAtual = estadoAtualizacao();
+  // Se o estado persistido diz "reiniciando", este processo É o servidor já
+  // reiniciado — a atualização foi aplicada e o código novo está ativo.
+  // Limpa o estado para "ocioso" para a UI recarregar a página e seguir.
+  if (stAtual.fase === "reiniciando") {
+    salvarEstado({ ...stAtual, fase: "ocioso", mensagem: "Atualização aplicada. Servidor reiniciado." });
+    stAtual = estadoAtualizacao();
+  }
+  if (!base) {
+    if (stAtual.fase !== "ocioso") {
+      salvarEstado({ ...stAtual, fase: "ocioso", mensagem: "Atualizações desligadas (sem ARES_UPDATE_URL)." });
+    }
+    return { ...stAtual, fase: "ocioso", mensagem: "Atualizações desligadas (sem ARES_UPDATE_URL)." };
+  }
+  // Máquina do DESENVOLVEDOR: ela é a fonte das atualizações (publica, não
+  // consome) — nunca auto-aplica, para não sobrescrever edições locais.
+  if (process.env.ARES_DEV_MODE === "1") {
+    if (stAtual.fase !== "ocioso") {
+      salvarEstado({ ...stAtual, fase: "ocioso", mensagem: "Modo desenvolvedor: a máquina publica, não consome atualizações." });
+    }
+    return { ...stAtual, fase: "ocioso", mensagem: "Modo desenvolvedor: a máquina publica, não consome atualizações." };
+  }
+  if (emAndamento || stAtual.fase === "baixando" || stAtual.fase === "aplicando" || stAtual.fase === "reiniciando") {
+    return estadoAtualizacao();
+  }
+  // No mínimo 30s entre verificações manuais repetidas (o poll periódico de
+  // 1 min sempre passa — o guard só impede spam de POST /api/updates).
+  if (Date.now() - ultimaVerificacao < 30_000 && stAtual.fase === "ocioso") {
+    return estadoAtualizacao();
+  }
+  ultimaVerificacao = Date.now();
+  try {
+    const res = await fetch(`${base}/manifest.json?t=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) {
+      salvarEstado({ ...stAtual, fase: "erro", mensagem: `Servidor de atualizações inacessível (HTTP ${res.status}).` });
+      return estadoAtualizacao();
+    }
+    const m = (await res.json()) as Manifest;
+    if (!m || !Array.isArray(m.arquivos) || !m.versao) {
+      salvarEstado({ ...stAtual, fase: "erro", mensagem: "manifest.json inválido." });
+      return estadoAtualizacao();
+    }
+    if (m.versao <= stAtual.versaoAplicada) {
+      return { ...estadoAtualizacao(), fase: "ocioso", mensagem: "Sem atualizações disponíveis." };
+    }
+    void baixarEAplicar(m);
+    return estadoAtualizacao();
+  } catch (e) {
+    salvarEstado({
+      ...stAtual,
+      fase: "erro",
+      mensagem: `Falha ao verificar atualizações: ${e instanceof Error ? e.message : String(e)}`,
+    });
+    return estadoAtualizacao();
+  }
+}
+
+/** Inicia o poller em segundo plano (chamado no boot do servidor). */
+export function iniciarAtualizador(): void {
+  const min = intervaloMin();
+  setTimeout(() => void verificarAgora(), 15_000);
+  setInterval(() => void verificarAgora(), min * 60_000);
+  console.info(`[atualizador] ativo (a cada ${min} min)${baseUrl() ? ` — fonte: ${baseUrl()}` : " — sem ARES_UPDATE_URL"}`);
+}
+
+/** Lista de arquivos do projeto (para o script de publicação). */
+export function listarArquivosProjeto(): string[] {
+  const ignorar = new Set([...PROTEGIDOS, "scripts/__pycache__"]);
+  const saida: string[] = [];
+  const percorrer = (dir: string, rel: string) => {
+    for (const nome of readdirSync(dir, { withFileTypes: true })) {
+      if (nome.name.startsWith(".")) continue;
+      const relAtual = rel ? `${rel}/${nome.name}` : nome.name;
+      if (ignorar.has(relAtual) || ignorar.has(nome.name)) continue;
+      if (nome.isDirectory()) percorrer(join(dir, nome.name), relAtual);
+      else if (nome.isFile()) saida.push(relAtual);
+    }
+  };
+  percorrer(process.cwd(), "");
+  return saida;
+}
