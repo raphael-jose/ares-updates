@@ -1,0 +1,199 @@
+/**
+ * HERMES — daemon de velocidade do ARES.
+ *
+ * Roda em segundo plano, oculto, assim que o servidor inicia (instrumentation.ts):
+ * - AQUECE os módulos pesados em background (OCR tesseract, bibliotecas Office
+ *   docx/exceljs/pptxgenjs/jszip e o cliente LLM) para a primeira chamada de
+ *   cada um ser instantânea;
+ * - MANTÉM um cache LRU + TTL de resultados de ferramentas web (clima, câmbio,
+ *   cripto, busca), evitando refazer a mesma chamada de rede;
+ * - LIMPA memória: varre o cache a cada 60s, remove entradas vencidas e expõe
+ *   o heap usado;
+ * - EXPÕE status para o HUD (/api/hermes) e por voz ("status do hermes").
+ */
+
+import { ttsCacheCount, ttsCacheTrim } from "../tts-cache";
+
+interface CacheEntry {
+  v: string;
+  at: number;
+  ttlMs: number;
+}
+
+/** Máximo de entradas no cache (LRU: estourou, descarta a mais antiga). */
+const MAX_CACHE = 200;
+const cache = new Map<string, CacheEntry>();
+let hits = 0;
+let misses = 0;
+
+export interface HermesStatus {
+  ativo: boolean;
+  aquecido: string[];
+  aquecendo: string[];
+  llm: "ok" | "offline" | "aguardando";
+  /** Cache de voz persistente: áudios prontos carregados do disco + contagens. */
+  tts: { cacheItens: number; carregado: boolean };
+  /** yt-dlp (áudio do YouTube): ok | ausente | aguardando. */
+  ytdlp: "ok" | "ausente" | "aguardando";
+  cache: { itens: number; hits: number; misses: number };
+  heapMB: number;
+  uptimeS: number;
+}
+
+const state: {
+  ativo: boolean;
+  aquecido: Set<string>;
+  aquecendo: Set<string>;
+  llm: HermesStatus["llm"];
+  ttsCarregado: boolean;
+  ytdlp: HermesStatus["ytdlp"];
+} = {
+  ativo: false,
+  aquecido: new Set(),
+  aquecendo: new Set(),
+  llm: "aguardando",
+  ttsCarregado: false,
+  ytdlp: "aguardando",
+};
+const startedAt = Date.now();
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Busca um valor no cache ou computa e guarda (LRU + TTL). */
+export async function hermesCached<T>(
+  scope: string,
+  key: string,
+  ttlMs: number,
+  compute: () => Promise<T>,
+  shouldStore: (value: T) => boolean = () => true,
+): Promise<T> {
+  const full = `${scope}:${key}`;
+  const now = Date.now();
+  const hit = cache.get(full);
+  if (hit && now - hit.at < hit.ttlMs) {
+    hits += 1;
+    cache.delete(full);
+    cache.set(full, hit); // move para o fim (mais recente)
+    return JSON.parse(hit.v) as T;
+  }
+  misses += 1;
+  const value = await compute();
+  if (value !== null && value !== undefined && shouldStore(value)) {
+    if (cache.size >= MAX_CACHE) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (oldest) cache.delete(oldest);
+    }
+    cache.set(full, { v: JSON.stringify(value), at: now, ttlMs });
+  }
+  return value;
+}
+
+/**
+ * Versão em cache de uma ferramenta (chave = argumentos serializados com ordem
+ * estável — só resultados bem-sucedidos são guardados).
+ */
+export function cachedTool(
+  scope: string,
+  ttlMs: number,
+  impl: (args: Record<string, string>) => Promise<{ ok: boolean; message: string }>,
+): (args: Record<string, string>) => Promise<{ ok: boolean; message: string }> {
+  return (args) => {
+    const key = Object.keys(args)
+      .sort()
+      .map((k) => `${k}=${args[k]}`)
+      .join("&");
+    return hermesCached(scope, key, ttlMs, () => impl(args), (r) => r.ok);
+  };
+}
+
+/** Remove entradas vencidas (cache de ferramentas + poda do cache de voz). */
+function sweep(): void {
+  const now = Date.now();
+  for (const [k, e] of cache) {
+    if (now - e.at >= e.ttlMs) cache.delete(k);
+  }
+  try {
+    ttsCacheTrim();
+  } catch {
+    /* best-effort */
+  }
+}
+
+function heapMB(): number {
+  try {
+    return Math.round((process.memoryUsage().heapUsed / 1024 / 1024) * 10) / 10;
+  } catch {
+    return 0;
+  }
+}
+
+/** Estado atual do Hermes (síncrono — usado pela rota /api/hermes e por voz). */
+export function getHermesStatus(): HermesStatus {
+  const ttsCount = ttsCacheCount();
+  return {
+    ativo: state.ativo,
+    aquecido: [...state.aquecido],
+    aquecendo: [...state.aquecendo],
+    llm: state.llm,
+    tts: { cacheItens: ttsCount.memoria + ttsCount.disco, carregado: state.ttsCarregado },
+    ytdlp: state.ytdlp,
+    cache: { itens: cache.size, hits, misses },
+    heapMB: heapMB(),
+    uptimeS: Math.round((Date.now() - startedAt) / 1000),
+  };
+}
+
+async function markWarm(name: string, fn: () => Promise<unknown>): Promise<void> {
+  state.aquecendo.add(name);
+  try {
+    await fn();
+    state.aquecido.add(name);
+  } catch {
+    /* falha no aquecimento: não bloqueia o boot nem derruba o servidor */
+  } finally {
+    state.aquecendo.delete(name);
+  }
+}
+
+async function warmUp(): Promise<void> {
+  await Promise.allSettled([
+    // 1) OCR (tesseract.js): cria o worker em background — a primeira leitura
+    //    de tela (screen_read/screen_click) fica quase instantânea.
+    markWarm("ocr", async () => {
+      const { warmOcrInBackground } = await import("./tools");
+      await warmOcrInBackground();
+    }),
+    // 2) LLM: uma chamada mínima aquece a conexão e já detecta se está offline.
+    //    Desligável com HERMES_LLM_WARM=0 (evita chamada real a cada boot em dev).
+    markWarm("llm", async () => {
+      if (process.env.HERMES_LLM_WARM === "0") return;
+      const { askOllama } = await import("./llm");
+      const r = await askOllama("ok", []);
+      state.llm = r ? "ok" : "offline";
+    }),
+    // 3) Cache de voz persistente: carrega o índice do disco em background — a
+    //    primeira fala repetida sai do disco em milissegundos em vez de 2–20s.
+    markWarm("tts", async () => {
+      const { loadTtsCache } = await import("../tts-cache");
+      await loadTtsCache();
+      state.ttsCarregado = true;
+    }),
+    // 5) yt-dlp: garante/verifica o binário em background — a primeira busca
+    //    de música não espera probe nem download na hora do pedido.
+    markWarm("ytdlp", async () => {
+      const { ensureYtDlp } = await import("./music");
+      const bin = await ensureYtDlp();
+      state.ytdlp = bin ? "ok" : "ausente";
+    }),
+  ]);
+}
+
+/** Inicia o Hermes (fire-and-forget): aquecimento + varredura de memória. */
+export function startHermes(): void {
+  if (state.ativo) return;
+  state.ativo = true;
+  void warmUp();
+  if (!sweepTimer) {
+    sweepTimer = setInterval(sweep, 60000);
+    sweepTimer.unref?.();
+  }
+}
