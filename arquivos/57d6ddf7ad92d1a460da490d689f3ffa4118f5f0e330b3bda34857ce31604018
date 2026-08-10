@@ -1,0 +1,129 @@
+/**
+ * Pronúncia bilíngue: detecta palavras/termos em inglês no meio de texto em
+ * português e os marca para o TTS falar no idioma original.
+ *
+ * Ex.: "vou fazer um pull request" → o "pull request" deve soar em inglês.
+ *
+ * O edge-tts suporta SSML com <lang xml:lang="en-US">…</lang>, então a função
+ * devolve o texto pronto para SSML. Para motores que não suportam SSML
+ * (Piper/Razo local), os marcadores são limpos antes de sintetizar.
+ *
+ * IMPORTANTE: só entram termos que quase nunca são falsos positivos em pt-BR.
+ * As regexes NÃO usam a flag /g: test() com /g avança lastIndex e a segunda
+ * chamada devolveria falso negativo (bug intermitente).
+ */
+
+type Termo = { re: RegExp };
+
+// Termos técnicos/jargão que o brasileiro fala em inglês.
+const TERMOS: Termo[] = [
+  { re: /pull request(?:s)?/i },
+  { re: /code review(?:s)?/i },
+  { re: /open source/i },
+  { re: /push(?:ing)?/i },
+  { re: /commit(?:s|ing)?/i },
+  { re: /merge(?:s|ing|d)?/i },
+  { re: /branch(?:es)?/i },
+  { re: /deploy(?:s|ing)?/i },
+  { re: /feature(?:s)?/i },
+  { re: /sprint(?:s)?/i },
+  { re: /standup(?:s)?/i },
+  { re: /codebase/i },
+  { re: /framework(?:s)?/i },
+  { re: /frontend/i },
+  { re: /backend/i },
+  { re: /fullstack/i },
+  { re: /deadline(?:s)?/i },
+  { re: /feedback/i },
+  { re: /roadmap(?:s)?/i },
+  { re: /pipeline(?:s)?/i },
+  { re: /workflow(?:s)?/i },
+  { re: /dashboard(?:s)?/i },
+  { re: /background/i },
+  { re: /default/i },
+  { re: /update(?:s|ing)?/i },
+  { re: /upgrade(?:s|ing)?/i },
+  { re: /download(?:s|ing)?/i },
+  { re: /upload(?:s|ing)?/i },
+  { re: /backup(?:s)?/i },
+  { re: /login/i },
+  { re: /logout/i },
+  { re: /website(?:s)?/i },
+  { re: /browser(?:s)?/i },
+  { re: /server(?:s)?/i },
+  { re: /client(?:s)?/i },
+  { re: /database(?:s)?/i },
+  { re: /software/i },
+  { re: /hardware/i },
+  { re: /screen(?:s)?/i },
+  { re: /screenshot(?:s)?/i },
+  { re: /meeting(?:s)?/i },
+  { re: /milestone(?:s)?/i },
+  { re: /marketing/i },
+  { re: /branding/i },
+  { re: /hacking/i },
+  { re: /stream(?:s|ing)?/i },
+  { re: /playlist(?:s)?/i },
+  { re: /podcast(?:s)?/i },
+  { re: /newsletter(?:s)?/i },
+  { re: /e-?mail(?:s)?/i },
+  { re: /password(?:s)?/i },
+  { re: /username/i },
+  { re: /account(?:s)?/i },
+  { re: /profile(?:s)?/i },
+  { re: /notification(?:s)?/i },
+  { re: /stalking/i },
+  { re: /marketing digital/i },
+  { re: /github/i },
+  { re: /gitlab/i },
+  { re: /slack/i },
+  { re: /discord/i },
+  { re: /spotify/i },
+  { re: /netflix/i },
+  { re: /tiktok/i },
+  { re: /instagram/i },
+  { re: /youtube/i },
+  { re: /whatsapp/i },
+  { re: /google/i },
+  { re: /chrome/i },
+  { re: /windows/i },
+  { re: /linux/i },
+  { re: /iphone/i },
+  { re: /android/i },
+  { re: /microsoft/i },
+  { re: /apple/i },
+  { re: /amazon/i },
+  { re: /facebook/i },
+  { re: /linkedin/i },
+  { re: /uber/i },
+  { re: /javascript/i },
+  { re: /typescript/i },
+  { re: /python/i },
+];
+
+/**
+ * Devolve o texto com os termos em inglês embrulhados em <lang xml:lang="en-US">.
+ * Se `clean` for true, remove os marcadores e devolve o texto puro.
+ */
+export function wrapEnglishTerms(text: string, clean = false): string {
+  if (!text) return text;
+  let out = text;
+  for (const t of TERMOS) {
+    // Lookbehind evita re-embrulhar o que já está embrulhado
+    out = out.replace(
+      new RegExp(`(?<!<lang xml:lang="en-US">)(${t.re.source})`, "gi"),
+      (m) => (clean ? m : `<lang xml:lang="en-US">${m}</lang>`),
+    );
+  }
+  return out;
+}
+
+/** Limpa marcadores SSML (para motores sem suporte: Piper/Razo). */
+export function stripLangTags(text: string): string {
+  return text.replace(/<\/?lang[^>]*>/gi, "");
+}
+
+/** Verifica se o texto contém algum termo em inglês (para decidir o motor). */
+export function hasEnglishTerms(text: string): boolean {
+  return TERMOS.some((t) => t.re.test(text));
+}
