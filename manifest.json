@@ -1,10 +1,12 @@
 {
-  "versao": "20260810-154156",
+  "versao": "20260810-161835",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: entrega em tempo real - mensagens que chegam durante o handshake sao guardadas e entregues (fila pre-sessao), e abrir o chat re-dispara a conexao de contatos desconectados.",
-    "Chat P2P: status honesto e diagnostico NAT - presenca do broker nao e mais confundida com conexao; contato presente sem canal mostra 'conectando', com dica de NAT e botao reconectar (sem remover o contato)."
+    "Chat P2P: conexao entre casas GARANTIDA - relay TURN publico automatico (openrelay.metered.ca, o mesmo usado por Nextcloud/Matrix/Jitsi). Sem configurar nada, a conexao agora atravessa NAT restritivo/CGNAT entre casas diferentes. Os dados seguem criptografados de ponta a ponta (o relay so ve ciphertext). Para usar um relay proprio, preencha TURN_URL/TURN_USERNAME/TURN_PASSWORD no .env.",
+    "Chat P2P: aviso por voz, som e badge quando um contato volta a ficar online.",
+    "Chat P2P: diagnostico ICE no painel do desenvolvedor (candidatos host/srflx/relay, estado do canal e uso de TURN) para diagnosticar quedas sem abrir o console.",
+    "Chat P2P: aviso claro quando o relay TURN nao esta disponivel, explicando como resolver."
   ],
   "arquivos": [
     {
@@ -94,8 +96,8 @@
     },
     {
       "caminho": "app/api/turn/route.ts",
-      "url": "arquivos/c2b465f0db424cca7b1fd7c6a3188b553b789ba14e264d007db70099fc5045fe",
-      "sha256": "c2b465f0db424cca7b1fd7c6a3188b553b789ba14e264d007db70099fc5045fe"
+      "url": "arquivos/1c763627e1df47a33690ac3eaec89d34b201f503728dbca9b384a96c3b3cd732",
+      "sha256": "1c763627e1df47a33690ac3eaec89d34b201f503728dbca9b384a96c3b3cd732"
     },
     {
       "caminho": "app/api/updates/route.ts",
@@ -109,8 +111,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/14fcfedf39d2ea12c8531e13656690e48a657550e489b61927164c69f61c8bae",
-      "sha256": "14fcfedf39d2ea12c8531e13656690e48a657550e489b61927164c69f61c8bae"
+      "url": "arquivos/6d07eaef2d9f8af3cb342b9ccb5f00694a9617b6e930db9410d8eed0f6c5e095",
+      "sha256": "6d07eaef2d9f8af3cb342b9ccb5f00694a9617b6e930db9410d8eed0f6c5e095"
     },
     {
       "caminho": "app/icon.svg",
@@ -129,8 +131,8 @@
     },
     {
       "caminho": "arthemis.bat",
-      "url": "arquivos/1f7d3d0a4c479f141697ed12c0f0a51b8393161c08380c52edac1a2f3b373580",
-      "sha256": "1f7d3d0a4c479f141697ed12c0f0a51b8393161c08380c52edac1a2f3b373580"
+      "url": "arquivos/61ae556f0ac398b7f8fe359ae8711f57106c017b2749a5e4dbade9350ea1bbd1",
+      "sha256": "61ae556f0ac398b7f8fe359ae8711f57106c017b2749a5e4dbade9350ea1bbd1"
     },
     {
       "caminho": "COMANDOS.md",
@@ -139,8 +141,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/75e73f2f6e2d9b9e4227b1d8f00987582d9b36c48ff5a29eed7be5bedad57499",
-      "sha256": "75e73f2f6e2d9b9e4227b1d8f00987582d9b36c48ff5a29eed7be5bedad57499"
+      "url": "arquivos/56f9368ea2f0dea5174ab2fc49759c964d60b045350c120bd84fb9d48be6eba4",
+      "sha256": "56f9368ea2f0dea5174ab2fc49759c964d60b045350c120bd84fb9d48be6eba4"
     },
     {
       "caminho": "instrumentation.ts",
@@ -229,8 +231,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/28485551d567f10e1a2b010f9efd6dc22a1711aad8d13f0b6836f7e5cd192e93",
-      "sha256": "28485551d567f10e1a2b010f9efd6dc22a1711aad8d13f0b6836f7e5cd192e93"
+      "url": "arquivos/b99e9ffb1922436e2c2858c0d5525e028a564f0808eb37c658aa2c98c4aef42c",
+      "sha256": "b99e9ffb1922436e2c2858c0d5525e028a564f0808eb37c658aa2c98c4aef42c"
     },
     {
       "caminho": "lib/agent/project.ts",
