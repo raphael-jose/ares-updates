@@ -1,0 +1,37 @@
+/**
+ * Hermes: inicia o daemon de velocidade em segundo plano quando o servidor sobe.
+ * Roda oculto — nunca bloqueia o boot e nunca derruba o servidor.
+ */
+export async function register(): Promise<void> {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    try {
+      const { startHermes } = await import("./lib/agent/hermes");
+      startHermes();
+    } catch {
+      /* se o aquecimento falhar, o servidor segue normal */
+    }
+    try {
+      // Atualizador automático: checa o manifest remoto periodicamente e
+      // instala sozinho (a IA avisa em voz quando há atualização).
+      const { iniciarAtualizador } = await import("./lib/atualizador");
+      iniciarAtualizador();
+    } catch {
+      /* atualizador é best-effort — nunca derruba o boot */
+    }
+    try {
+      // Telemetria de erros: envia falhas ao broker (dev recebe) e, na
+      // máquina do dev, assina e injeta erros remotos na área de erros.
+      const { ativarTelemetriaErros } = await import("./lib/agent/erros");
+      ativarTelemetriaErros();
+    } catch {
+      /* telemetria é best-effort — nunca derruba o boot */
+    }
+    try {
+      // Feedback dos usuários: o dev assina e persiste sugestões recebidas.
+      const { ativarFeedback } = await import("./lib/agent/feedback");
+      ativarFeedback();
+    } catch {
+      /* feedback é best-effort — nunca derruba o boot */
+    }
+  }
+}
