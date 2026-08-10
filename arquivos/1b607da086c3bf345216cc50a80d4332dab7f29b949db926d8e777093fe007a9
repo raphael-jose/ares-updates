@@ -1,0 +1,56 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  getMemorySnapshot,
+  memoryAdd,
+  memoryRemove,
+  type MemorySection,
+} from "@/lib/agent/memory";
+
+export const runtime = "nodejs";
+
+const SECTIONS: MemorySection[] = [
+  "usuario",
+  "contatos",
+  "fatos",
+  "tarefas",
+  "notas",
+  "historicoMusica",
+  "agenda",
+];
+
+/** Devolve a memória completa (usuario, contatos, fatos, tarefas) para o painel do HUD. */
+export async function GET() {
+  return NextResponse.json(getMemorySnapshot());
+}
+
+/** Adiciona/atualiza um item na memória. Body: { section, key, value }. */
+export async function POST(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as {
+    section?: unknown;
+    key?: unknown;
+    value?: unknown;
+  };
+  const section = String(body.section ?? "") as MemorySection;
+  const key = String(body.key ?? "");
+  const value = String(body.value ?? "");
+  if (!SECTIONS.includes(section)) {
+    return NextResponse.json({ ok: false, message: "Seção desconhecida." }, { status: 400 });
+  }
+  const result = await memoryAdd(section, key, value);
+  return NextResponse.json(result);
+}
+
+/** Remove um item da memória. Body: { section, key }. */
+export async function DELETE(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as {
+    section?: unknown;
+    key?: unknown;
+  };
+  const section = String(body.section ?? "") as MemorySection;
+  const key = String(body.key ?? "");
+  if (!SECTIONS.includes(section)) {
+    return NextResponse.json({ ok: false, message: "Seção desconhecida." }, { status: 400 });
+  }
+  const result = await memoryRemove(section, key);
+  return NextResponse.json(result);
+}
