@@ -1,0 +1,623 @@
+# Arthemis — Lista completa de comandos de voz e capacidades
+
+> A Arthemis é uma assistente de voz em português do Brasil com **autoridade total sobre o
+> computador**: cria arquivos, controla programas, acessa a internet, usa redes
+> sociais, lembra de tudo e conversa com contexto. Fale com ela (ou digite) do jeito
+> natural — ela entende variações: "crie", "cria", "criar", "faz", "fazer", "quero"... 🤖
+
+---
+
+## 1. Conversa e saudações
+
+| Fale | O que acontece |
+|---|---|
+| `oi`, `olá`, `e aí`, `hey` | Cumprimento (usa seu nome se você já se apresentou) |
+| `bom dia` / `boa tarde` / `boa noite` | Cumprimento do período |
+| `boa noite` (sozinho) | **Rotina da noite** (com confirmação): fecha chrome/spotify/discord, agenda o despertador de amanhã às 7h e resume a agenda de amanhã |
+| `bom dia` (sozinho) | **Rotina da manhã** (com confirmação): resume a agenda de hoje e fala o clima (se tiver sua cidade na memória) |
+| `executa a rotina boa noite` / `roda a rotina bom dia` | Executa a rotina pelo nome (com confirmação) |
+| `quais rotinas você tem?` / `lista de rotinas` | Lista as rotinas disponíveis |
+| Confirmar rotina | `sim`, `pode`, `ok` |
+| Cancelar rotina | `não`, `cancela` |
+| `qual é o meu nome?` | Diz seu nome (se foi salvo) |
+| qualquer pergunta | O LLM (local ou nuvem) responde em PT-BR com contexto da conversa |
+| *(interromper falando)* | **Barge-in**: corta a fala do ARES na hora e processa o que você disse |
+| `quero digitar` / `vou digitar` | Abre a caixa de texto para digitar URL/@/comando |
+| digitar um comando | Funciona igual a falar (e também interrompe a fala) |
+
+---
+
+## 2. Arquivos e pastas
+
+| Fale | Exemplos |
+|---|---|
+| Criar pasta | `cria uma pasta chamada projetos`, `cria pasta fotos em downloads` |
+| Criar arquivo | `cria um arquivo chamado notas.txt`, `cria um arquivo chamado ideias.md com conteúdo sobre planos` |
+| Criar projeto | `cria um projeto chamado meuapp` (README.md + index.html, extensível) |
+| Listar pasta | `liste a pasta downloads`, `o que tem na pasta projetos` |
+| Abrir pasta | `abra a pasta documentos` |
+| Apagar | `apaga o arquivo notas.txt`, `apaga a pasta temporario` — **pede confirmação por voz** |
+| Renomear | `renomeie relatorio.txt para relatorio-final.txt` |
+| Ler arquivo | `leia o arquivo notas.txt`, `leia o arquivo src/app.ts da linha 40 a 80` |
+| Editar arquivo | `troque ola por tchau no arquivo notas.txt`, `substitua X por Y em app.ts` |
+| Confirmar exclusão | `sim`, `pode`, `ok`, `pode apagar` |
+| Cancelar exclusão | `não`, `cancela`, `pare` |
+
+> **Dica:** ao apagar pelo nome simples (`apaga notas.txt`), o ARES procura nas
+> pastas comuns (Desktop, Downloads, Documentos…) — e recusa apagar a própria
+> home/Desktop/Downloads.
+
+---
+
+## 4. Programas e aplicativos
+
+| Fale | Exemplos |
+|---|---|
+| Abrir programa | `abra a calculadora`, `abre o chrome`, `abra o discord`, `abra o spotify` |
+| App da Microsoft Store | `abre o whatsapp`, `abre o instagram` (resolvem pelo pacote instalado) |
+| Programa qualquer | `abra o programa bloco de notas`, `abra o vscode` |
+| Terminal/comandos | `execute o comando ipconfig`, `rode o comando dir` |
+| Abrir no navegador | `abra o site youtube.com`, `abra no navegador github.com` |
+| Abrir o YouTube | `abre o youtube` (abre o site do YouTube) |
+
+### 🎵 Música e vídeos (YouTube — abre o vídeo direto)
+
+### Player de música no HUD (só o áudio)
+
+Pedidos **de música** (no plural, playlist, álbum ou "quero ouvir") abrem o
+**player de música do HUD** — o ARES busca no YouTube, monta uma playlist e toca
+**apenas o áudio** (sem abrir o vídeo). A primeira vez que usar, ele baixa o
+`yt-dlp` (self-contained, ~19MB) para `scripts/` — depois fica instantâneo.
+
+| Fale | O que faz |
+|---|---|
+| `tocar músicas do linkin park` | Busca e toca as músicas (álbuns completos marcados) |
+| `toca músicas da anitta` / `toca as músicas de coldplay` | Idem |
+| `toca playlist de rock nacional` | Toca a playlist como lista de áudio |
+| `toca o álbum The Wall de pink floyd` | Busca o álbum completo |
+| `tocar um pouco de jazz` | Toca o tema |
+| `quero ouvir bossa nova` / `queria ouvir música clássica` | Idem |
+| `toca música de fundo` / `toca música ambiente` | Toca música relaxante para foco |
+| `pausa a música` / `continua a música` | Controle por voz |
+| `próxima música` / `pula essa` / `música anterior` | Navega na playlist |
+| `aumenta o volume` / `abaixa o volume` / `sobe o som` | Ajusta o volume |
+| `fecha o player de música` | Fecha a janela |
+
+Depois de uma busca, o player mostra **chips de expansão**: `MAIS DE <artista>`
+(busca o artista da primeira faixa e adiciona à playlist) e `SEMELHANTES A X`
+(artistas parecidos). Um clique adiciona as faixas novas à playlist atual, sem
+duplicar as que já estão lá.
+
+> Se a intenção for **vídeo** ("toca o vídeo X", "toca X no youtube") o ARES
+> continua abrindo o **vídeo direto no player do YouTube**, como antes.
+
+Ao pedir para **tocar/ouvir um vídeo**, o ARES abre o **primeiro resultado direto no player**
+(não fica na página de busca):
+
+| Fale | O que faz |
+|---|---|
+| `toca a música despacito` | Abre o vídeo da música no YouTube direto |
+| `toca a música do luis fonsi` | Idem (pelo artista) |
+| `coloque um vídeo sobre energia solar` | Abre o 1º vídeo do tema |
+| `toca despacito no youtube` / `toca o vídeo da copa de 2022 no youtube` | Idem |
+| `abre um vídeo de receita de bolo` | Idem |
+| `pesquisa no youtube despacito` / `pesquisa despacito no youtube` | **Também abre o 1º vídeo direto** (pesquisar no YouTube = quer assistir) |
+| `mostra os resultados de X no youtube` / `abre a busca de X no youtube` | Abre a **lista de resultados** (quando você quer ver vários) |
+| `toca um vídeo do tiktok sobre cachorros` | Abre o **1º vídeo do TikTok** direto |
+| `toca um tiktok de dança` | Idem |
+| `toca um vídeo do instagram sobre receitas` / `assiste um reels sobre gatos` | Abre o **1º Reels do Instagram** direto |
+
+> Se não achar o vídeo exato, o ARES abre a busca da rede com o termo certo
+> (em vez de travar). Só pedidos **explícitos de lista** ("mostra os resultados",
+> "abre a busca") ficam na página de busca; todo o resto abre o vídeo direto.
+> TikTok/Instagram bloqueiam leitura server-side, então o ARES acha o 1º vídeo
+> via busca web (DuckDuckGo) — funciona na maioria dos casos e sempre cai na
+> busca da rede se não achar.
+
+---
+
+## 5. Internet, pesquisa e redes sociais
+
+| Fale | O que faz |
+|---|---|
+| `pesquise na internet sobre buracos negros` | Busca no DuckDuckGo e fala os principais resultados |
+| `pesquisa no google preço do ps5` | **Pesquisa "preço do ps5"** (sem incluir a palavra "google") — abre o Google com o termo certo |
+| `pesquisa preço do ps5 no google` | Idem |
+| `me diga o que é JavaScript` | Resposta com pesquisa (se o assunto for conhecimento/fato) |
+| `pesquise o preço do ps5` | Busca e fala resultados com links |
+| `pesquise @sagartamang no instagram` | Abre a pesquisa na rede escolhida |
+| `pesquise x no youtube` / `no tiktok` / `no x` / `no facebook` / `no linkedin` / `no github` | Abre a busca na rede específica |
+| `abra o perfil do @fulano no instagram` | Abre o perfil direto |
+| `quem é o fulano no github` | Pesquisa o perfil na rede |
+| `mostra uma imagem de cachorros` | **Mostra a imagem no visualizador do HUD** (Wikimedia Commons) |
+| `me mostra uma foto de um carro` / `quero ver uma imagem de energia solar` | Idem |
+| `pesquisa uma imagem de X` / `procura uma foto de Y` / `busca uma imagem de Z` | Idem — verbos de busca também abrem o visualizador (não listam links) |
+
+**Imagens no HUD**: quando você pede para *ver/pesquisar/procurar* uma imagem,
+o ARES a exibe no **visualizador de imagens** (painel que abre na tela com a
+foto grande, botão **ABRIR NO NAVEGADOR** para abrir no navegador real do
+sistema e **FECHAR**). Não
+é um link: a imagem
+aparece de verdade, carregada pelo proxy do HUD (funciona mesmo com sites que
+bloqueiam hotlink).
+
+---
+
+## 6. WhatsApp (com confirmação)
+
+| Fale | O que faz |
+|---|---|
+| `manda mensagem para mãe dizendo: chego em 10 minutos` | Envia no **WhatsApp real** (sessão whatsapp-web.js, número salvo na memória) |
+| `manda zap pra mãe dizendo oi` | Idem (aceita “zap”, “msg”) |
+| `envie uma mensagem para 5511999999999 com o texto: oi` | Envia pelo número |
+| `abre o whatsapp e manda zap pra João…` | Fluxo composto |
+| `abre o whatsapp` | Abre a **janela do WhatsApp no HUD** (QR code da sessão / conversas / responder) |
+| `fecha o whatsapp` | Fecha a janela do WhatsApp no HUD |
+| `leia o whatsapp` / `o que chegou no zap` | Lista as **conversas recentes** (sessão real) |
+| `leia o whatsapp da mãe` | Mostra as **últimas mensagens** daquele contato/grupo |
+| Confirmar | `sim`, `pode mandar`, `ok` |
+| Cancelar | `não`, `cancela` |
+
+> O envio real só acontece **depois da confirmação por voz**. A primeira vez,
+> diga `abre o whatsapp` e **escaneie o QR code** que aparece na janela do HUD
+> (WhatsApp do celular → Aparelhos conectados → Conectar aparelho). A sessão
+> fica salva e reconecta sozinha nas próximas vezes. Mensagens recebidas são
+> **faladas pelo ARES** em tempo real. Se a sessão não estiver conectada, ele
+> cai para o aplicativo do Windows ou para a conversa no navegador. Número
+> nacional sem DDI ganha o **+55** automaticamente (11 99999-9999 →
+> 5511999999999). Se não tiver o número do contato, ele pede e oferece guardar
+> na memória:
+
+> O envio real só acontece **depois da confirmação por voz**. Número nacional sem
+> DDI ganha o **+55** automaticamente (11 99999-9999 → 5511999999999). Se não
+> tiver o número do contato, ele pede e oferece guardar na memória:
+> `o número da mãe é 5511999999999`.
+
+---
+
+## 7. Tela (captura, leitura e clique)
+
+| Fale | O que faz |
+|---|---|
+| `tira um print da tela` | Captura a tela, salva PNG em Imagens e abre |
+| `leia a tela` | Lê o texto visível na tela (OCR local) |
+| `clica em Enviar` | Clica no texto indicado (captura a tela **na hora** se não houver leitura recente) |
+| `veja a tela e clique no botão OK` | Lê a tela e clica numa ação só |
+| `aperte em Salvar` | Idem (clique) |
+| `clica duas vezes em Notepad` | **Duplo clique** no texto (ex.: abrir ícone do desktop) |
+| `dá dois cliques em Chrome` | Idem |
+| `clica no ponto 500 300` | Clique em **coordenada exata** da tela |
+| `digita olá mundo` | **Digita texto** no campo focado (coordenadas reais; acentos via área de transferência) |
+| `digita preço do ps5 e aperta enter` | Digita o texto e pressiona a tecla depois |
+| `aperta enter` / `pressiona tab` / `dá esc` | Pressiona tecla especial (enter, tab, esc, backspace, setas, f1-f12, ctrl+c, ctrl+v, ctrl+a, alt+tab…) |
+| `descreve a tela` / `o que você vê na tela?` | **Modelo de visão** descreve o que está na tela (fallback OCR) |
+
+> Disponível no Windows. O OCR usa o **Windows.Media.Ocr nativo** (rápido, idioma português) com fallback
+> local (tesseract.js); o clique e a digitação sempre usam uma captura recente — **tempo real**, sem cache
+> velho. O `screen_ask` (descrever a tela) usa um modelo de visão gratuito quando configurado:
+> `KIWI_CLOUD_MODEL` vision (gemini/gpt-4o…) ou `KIWI_OLLAMA_MODEL` com visão (llava, qwen2.5-vl, llama3.2-vision…).
+
+---
+
+## 7b. Janelas do Windows (maximizar, minimizar, fechar, alternar)
+
+| Fale | O que faz |
+|---|---|
+| `maximiza a janela do chrome` / `maximiza o chrome` | Maximiza a janela do programa |
+| `minimiza a janela do word` / `minimiza o word` | Minimiza |
+| `restaura a janela do vscode` | Restaura (tira da maximizada/minimizada) |
+| `fecha a janela do chrome` / `fecha o word` | Fecha a janela do programa |
+| `alterna para o chrome` / `vai para o word` / `ativa o vscode` | **Traz a janela para a frente** (alterna entre apps) |
+| `quais janelas estão abertas` / `lista as janelas abertas` | Lista as janelas abertas (programa + título) |
+
+> Nomes aceitos: chrome, edge, firefox, word, excel, powerpoint, notepad,
+> calculadora, vscode, whatsapp, discord, spotify, telegram, explorador,
+> cmd, powershell, outlook — ou qualquer **trecho do título** da janela.
+> Se não achar a janela, o ARES sugere `lista as janelas abertas`.
+
+---
+
+## 8. Lista de tarefas
+
+---
+
+## 8. Lista de tarefas
+
+| Fale | Exemplos |
+|---|---|
+| Anotar | `adiciona na minha lista de tarefas: comprar pão`, `anota que preciso pagar a conta de luz` |
+| Remover | `remove da minha lista de tarefas: comprar pão`, `apaga a tarefa pagar a conta` |
+| Consultar | `quais são minhas tarefas?`, `lista de tarefas`, `o que tenho para fazer` |
+
+## 8b. Agenda / calendário
+
+Compromissos com **data e hora** (a lista de tarefas continua existindo para coisas sem horário). Ficam no mesmo `~/.ares/memory.json` e aparecem numa **janela própria do HUD (CALENDÁRIO)** — aberta por voz (`abre o calendário`, `mostra a agenda`) ou **clicando na data/hora do relógio do HUD** — além da seção AGENDA do painel MEMÓRIA (ambos sincronizados com a memória). Também há API dedicada em `/api/agenda`.
+
+| Fale | Exemplos |
+|---|---|
+| Abrir janela | `abre o calendário`, `mostra a agenda`, `atualiza o calendário` / `fecha o calendário` |
+| Marcar | `marca reunião amanhã às 15h`, `agenda consulta sexta-feira às 10h`, `marca almoço dia 20 ao meio dia`, `compromisso 20/12 às 14h`, `marca reunião amanhã às 15h no escritório` |
+| **Recorrentes** | `toda sexta às 10h reunião de time` (semanal), `todo dia às 8h alongamento` (diário), `todo dia 15 às 9h pagar aluguel` (mensal), `toda segunda às 9h` |
+| Consultar | `o que tenho na agenda?`, `minha agenda`, `agenda de hoje`, `compromissos de amanhã`, `agenda da semana`, `o que tenho sexta?` |
+| Desmarcar | `remove da agenda a reunião de sexta`, `cancela o compromisso 2`, `apaga o almoço do dia 20` (remover um recorrente apaga a série inteira) |
+
+**Datas entendidas:** hoje, amanhã, depois de amanhã, dia da semana (`sexta`, `sábado`), `próxima semana`, `dia 15`, `15 de agosto`, `20/12`, `às 15h`, `15h30`, `meio dia`, `da manhã/tarde/noite`. Sem data nem hora, o ARES pergunta quando é o compromisso.
+
+**Recorrências:** `toda(s) + dia da semana` → semanal; `todo dia` / `todos os dias` → diário; `todo dia N` / `todo mês` → mensal. O calendário pinta **todas as ocorrências** do mês visível, e consultas como `agenda de hoje` incluem o recorrente se ele cai hoje.
+
+### 🔔 Alertas de eventos (fala na hora certa)
+
+O ARES **verifica a agenda sozinho** (a cada ~20s) e **fala em voz** quando um compromisso está chegando — sem precisar pedir:
+
+- **Antecedência** (padrão 5 min): `Faltam 5 minutos para reunião com o time.` → chip `🔔 título` no HUD
+- **Na hora**: `É agora: reunião com o time!` com beep e flash do orbe
+- Ajustar a antecedência: `me avise 10 minutos antes` (1–60 min, guardado)
+- Funciona com compromissos **recorrentes** (avisa toda ocorrência)
+
+---
+
+## 8c. Controle financeiro
+
+Receitas e despesas persistidas em `~/.ares/finance.json`, com resumo de saldo, totais do mês e maiores categorias de gasto. Também há API dedicada em `/api/finance`.
+
+| Fale | Exemplo |
+|---|---|
+| Registrar despesa | `gastei 50 reais em lanche`, `paguei 120 de conta de luz`, `adiciona despesa de 30 em transporte`, `comprei ingresso por 90` |
+| Registrar receita | `ganhei 2000 de salário`, `recebi 500 de freela`, `registra receita de 1500` |
+| Resumo | `meu saldo`, `quanto gastei esse mês`, `resumo financeiro`, `extrato`, `quanto eu tenho` |
+| Listar / remover | `extrato`, `remove a despesa #1`, `apaga o lançamento #2` |
+| **Abrir a planilha** | `abre as finanças`, `abre a planilha`, `mostra minhas finanças`, `planilha` |
+
+**Categorias reconhecidas:** alimentação, transporte, moradia, lazer, saúde, educação, salário (senão vai para "outros"). O resumo fala saldo, receitas/despesas do mês e as 3 maiores categorias.
+
+**Na janela FINANÇAS (botão do painel COMANDOS, canto inferior esquerdo):** planilha estilo Office com saldo, receitas e despesas do mês no topo, e a tabela de lançamentos (data, descrição, categoria, valor). O formulário registra receita/despesa com valor, descrição e categoria; o botão 🗑 remove um lançamento. Tudo sincroniza com a voz e com a API `/api/finance`.
+
+---
+
+## 8d. Identidade criptográfica, rede P2P e CHAT (outras IAs)
+
+**Identidade real por instalação** (`lib/agent/identity.ts`): cada IA tem um par de chaves **ECDSA** (assinatura) + **ECDH** (acordo de chaves) P-256 gerado com aleatoriedade criptograficamente segura. O **fingerprint** (SHA-256 da chave pública) é a âncora de confiança; o nome amigável é `Nome#XXXX` — por padrão o `#XXXX` é derivado do fingerprint, mas pode ser escolhido no cadastro (ex.: `Raphael#966`). A **chave privada nunca sai da máquina** e é armazenada cifrada (PBKDF2 150k + AES-GCM) sob **senha** — desbloqueada uma vez por sessão.
+
+| Fale | Ação |
+|---|---|
+| `minha identidade`, `qual é o meu id` | Fala o ID público (ex.: `Arthemis#7084`) e abre o painel IDENTIDADE |
+| `abre a conexão`, `conectar com outra ia` | Abre o CHAT (conexão automática por ID) |
+| `abre o chat`, `mostra o chat`, `abre as conversas` | Abre a janela CHAT |
+| Botão IDENTIDADE no painel COMANDOS | Cria/desbloqueia a identidade, mostra fingerprint |
+| Botão CHAT no painel COMANDOS | Abre/fecha a janela CHAT |
+
+**Como conectar (automático, sem copiar/colar):**
+1. Adicione o contato pelo **ID público** (ex.: `Raphael#966`) — a instalação assina a presença dele e envia um convite sozinha
+2. Se a outra IA estiver **online** (identidade desbloqueada), o convite/resposta trafega pelo **broker de sinalização** e o canal WebRTC **direto** abre — o **handshake verifica a identidade**: desafio assinado (prova de posse da chave privada) + fingerprint conferido contra o contato salvo
+3. A presença é ao vivo: 🟢 online / 🟡 conectando / 🔴 offline, atualizada sozinha (não fica "offline" eterno)
+
+A sinalização usa um **broker MQTT público** (padrão `broker.hivemq.com`; configurável via `.env` → `ARES_MQTT_URL`) **apenas** para presença + troca do aperto de mão WebRTC — nenhum conteúdo passa por ele, e nada é armazenado (tópicos QoS 0). O chat em si continua **100% P2P** (WebRTC direto entre as duas máquinas) e E2E.
+
+**Segurança implementada:** mensagens **criptografadas E2E** (AES-GCM com chave de sessão derivada por ECDH+HKDF) e **assinadas** (ECDSA), com timestamp anti-replay e AAD = fingerprints dos dois lados. **Falsificação detectada**: se um peer se apresenta com um nome mas a chave não bate com o fingerprint salvo no contato, a conexão é REJEITADA com aviso. STUN público só atravessa o NAT — as mensagens nunca passam por servidor.
+
+**Limitações honestas:** o broker público é best-effort (sem SLA) — para uso sério, rode um broker próprio e aponte `ARES_MQTT_URL`. A descoberta continua dependente de sinalização (o broker substitui o copiar/colar); a unicidade real do ID é o fingerprint (o `#XXXX` é cosmético). Em NAT simétrico/CGNAT, o P2P direto falha e passa a depender de um relay **TURN** (suportado via `.env` — `TURN_URL`/`TURN_USERNAME`/`TURN_PASSWORD`, ex.: um `coturn` num VPS; o TURN só encaminha os dados, nunca armazena contas ou mensagens).
+
+**Na janela CHAT:** contatos à esquerda (adicionar por `Nome#XXXX` ou automático ao conectar), com estado 🟢 online / 🟡 conectando / 🔴 offline. Cada mensagem é **falada em voz** quando chega (com o chat fechado). Suporta:
+- **Texto** — bolha normal
+- **Imagens** — colando a URL (detecta `http…` e oferece enviar como imagem/vídeo), pelo 📎 (arquivo do PC) ou recebidas na conversa
+- **Vídeo** — URL ou arquivo, com player no chat
+- **Áudio** — gravação direto pelo microfone (botão 🎙, grava e envia em base64) ou arquivo
+- **Emojis animados** — picker 😀 (animação de pulsar na bolha)
+- **Stickers** — picker dedicado com emojis grandes
+
+**Limite honesto:** WebRTC sem servidor funciona bem em rede local / mesmo Wi-Fi. Atravessar NATs diferentes depende do STUN público e nem sempre conecta (aí é preciso rede local ou encaminhamento de porta).
+
+---
+
+## 9. Informações rápidas (APIs gratuitas)
+
+| Fale | Exemplo |
+|---|---|
+| Tempo | `qual a previsão do tempo em São Paulo?`, `vai chover em Curitiba?` |
+| Câmbio | `quanto é 100 dólares em reais?`, `converta 50 euros em libras` |
+| Cripto | `cotação do bitcoin`, `quanto vale o ethereum` |
+| Países | `qual é a capital do Brasil?`, `população do Japão`, `qual a moeda da Argentina?` |
+| Medidas | `quanto é 5 quilômetros em metros?`, `converta 100 graus fahrenheit em celsius` |
+| Piada | `conta uma piada`, `fala uma piada` |
+
+---
+
+## 10. Memória permanente (sobrevive ao desligar o PC)
+
+| Fale | O que guarda |
+|---|---|
+| `meu nome é Raphael` / `pode me chamar de Rafa` | Nome do usuário |
+| `o número da mãe é 5511999999999` | Contato (usa no WhatsApp depois) |
+| `guarde na memória que eu trabalho com design` | Fato |
+| `guarde o perfil @fulano no instagram` | Perfil de rede social |
+| `esqueça o contato da mãe` / `apague da memória a chave X` | Apaga informação |
+| `o que você sabe sobre mim?` / `mostre sua memória` | Lista o que lembra |
+| `limpa a conversa` | Apaga o **histórico da conversa** (não a memória) |
+
+> A memória fica em `~/.ares/memory.json`; o histórico da conversa em
+> `~/.ares/conversation.json` (últimos ~24 turnos, o que dá contexto de longo prazo).
+>
+> **Histórico de música**: tudo o que você toca no player de música do HUD é
+> guardado na memória (últimas 20, sem duplicar). O ARES usa esse histórico para
+> lembrar o que você ouviu e **sugerir de novo** ("Quer que eu toque de novo o que
+> você ouviu?"). Veja no painel MEMÓRIA → **HISTÓRICO DE MÚSICA**: ▶ toca de novo,
+> × remove.
+
+---
+
+## 10b. Anotações (textos mais longos que tarefas)
+
+| Fale | O que faz |
+|---|---|
+| `anota uma anotação: comprar presente para a mãe` | Guarda uma anotação |
+| `anota isso: ideias para o projeto` | Guarda (variação) |
+| `quais são minhas anotações` / `mostra minhas anotações` | Lista as anotações |
+| `apaga a anotação comprar presente` | Remove uma anotação |
+
+> Anotações ficam no mesmo `~/.ares/memory.json` das tarefas e fatos — sobrevivem
+> ao desligar e aparecem na memória do LLM (para ele lembrar no contexto).
+
+---
+
+## 10c. Resumo de documentos (texto longo → resumo falado)
+
+| Fale | O que faz |
+|---|---|
+| `resume o documento C:/meus/relatorio.docx` | Lê o arquivo e fala um resumo das frases mais informativas |
+| `resume o arquivo C:/projeto/README.md` | Idem para código/texto |
+
+> Suporta `.txt`, `.md`, código (`.ts`, `.py`…) e `.docx` (Word). O resumo é
+> extrativo (pega as frases-chave) e local — rápido, sem depender de internet.
+
+---
+
+## 10d. Humor do usuário (análise de sentimento)
+
+O ARES **analisa o sentimento do que você fala** e adapta o tom da resposta:
+
+- Fala algo frustrado/estressado → responde calmo, direto e reconfortante, sem
+  piadas, e oferece ajuda concreta.
+- Fala animado/feliz → espelha a energia e sugere o próximo passo.
+- Um chip no painel de voz mostra o humor detectado (😄 feliz, 🙂 animado,
+  😐 neutro, 😞 triste, 😠 tenso) e o contexto é injetado no prompt do modelo.
+- Palavras negativas com negação (`não gostei`) e intensificadores (`muito bom`)
+  são interpretados — é uma análise local heurística, sem enviar dados pra fora.
+
+O **nível de humor/sarcasmo do ARES** também é ajustável por voz e por
+porcentagem (0 = sério, 100 = máximo; padrão 50%):
+
+- `modo sério` / `sem sarcasmo` → 0% (respostas diretas e profissionais).
+- `modo brincalhão` / `máximo sarcasmo` → 100%.
+- `aumenta seu sarcasmo` / `diminui o humor` → sobe/desce 20 pontos.
+- `deixa o seu humor em 70%` → define o nível exato (0–100%).
+- `qual é o seu nível de humor?` → fala o nível atual.
+- No painel de voz há um **slider** com o nível atual. Se você estiver
+  estressado ou triste, o ARES desliga o sarcasmo mesmo com o nível alto.
+
+---
+
+---
+
+## 11. Timers, lembretes e alarmes (sem internet)
+
+| Fale | O que faz |
+|---|---|
+| `timer de 5 minutos` | Contagem regressiva (chip no HUD + beep ao final) |
+| `cria um timer de 30 segundos` | Idem |
+| `lembrete em 10 minutos para beber água` | Alerta com o texto do lembrete |
+| `me lembre de desligar o forno em 15 minutos` | Idem |
+| `alarme em 2 horas` | Idem |
+| `cancela os timers` / `apaga os lembretes` | Remove todos |
+
+---
+
+## 12. Controle da voz
+
+**Pronúncia bilíngue:** quando o ARES lê algo com termos em inglês (ex.:
+"vou fazer um pull request", "fiz um commit e um push para o github",
+"vou fazer o deploy"), ele **fala esses termos em inglês** — a voz muda para
+pronunciar corretamente (`pull request`, `commit`, `push`, `github`…), não
+portuguesado. Funciona com a voz do edge-tts (padrão); o fallback local
+(Piper/Razo) fala com sotaque brasileiro, sem travar.
+
+| Fale | O que faz |
+|---|---|
+| `sem som` / `cala a boca` / `silêncio` / `mudo` / `fica quieto` / `pare de falar` | Corta a fala e silencia as próximas |
+| `com som` / `volta a falar` / `fala novamente` / `desmutar` | Volta a falar |
+| *(falar durante a resposta)* | Interrompe (barge-in) e processa o novo comando |
+| `quero digitar` / `abre o campo de texto` | Abre a caixa de digitação |
+
+---
+
+## 12b. Registro de Ações (tabela de falhas)
+
+Quando o ARES **não consegue executar uma tarefa** (erro técnico), ele fala
+apenas *"no momento não posso realizar essa tarefa"* e registra o detalhe na
+tabela do Registro de Ações (persistida em `~/.ares/erros.json`): hora, tipo de
+ação, ferramenta e o motivo real. Erros amigáveis (ex.: "não encontrei esse
+arquivo") continuam sendo falados normalmente — só os técnicos são mascarados.
+
+| Fale | O que faz |
+|---|---|
+| `exibir log de erros` / `exibir erros` | Abre a janela REGISTRO DE AÇÕES no HUD |
+| `análise de ações` / `registro de ações` | Idem |
+| `fecha o registro de ações` | Fecha a janela |
+| Botão ERROS na janela MEMÓRIA | Abre o mesmo painel |
+| Botão LIMPAR na janela | Limpa a tabela |
+
+> No HUD o botão **ERROS** (junto do MEMÓRIA) também abre o painel.
+
+---
+
+## 13. Atalhos de teclado (HUD)
+
+| Tecla | Ação |
+|---|---|
+| `V` | Ligar/desligar voz |
+| `C` | Ligar/desligar a câmera (gestos + batimentos) |
+| `R` | Reiniciar a visão do orbe |
+| `+` / `−` | Zoom in / out do orbe |
+
+> As teclas não acionam nada enquanto você digita em qualquer campo de edição
+> (memória, URL, etc.).
+
+---
+
+## 14. Câmera, gestos e saúde
+
+- **`liga a câmera` / `mostra a câmera`** (ou tecla `C`): abre o painel de câmera
+  e inicia o **hand tracking** (MediaPipe). Com uma mão em pinça (polegar +
+  indicador), arraste para **girar o orbe**; com as duas mãos, afaste/aproxime
+  para dar **zoom**. O painel mostra o vídeo espelhado, a contagem de mãos e o
+  modo de gesto atual. Desligue com `desliga a câmera`.
+- **`modo interface`**: as mãos passam a controlar a UI — a mão em pinça vira um
+  cursor que **seleciona e arrasta os painéis do HUD** (título, relógio, dica,
+  registro, voz, comandos), e afastar/aproximar as duas mãos **redimensiona** o
+  painel selecionado. Duas palmas rápidas saem do modo. Volte com `sai do modo
+  interface` ou `modo normal`.
+- **Chip SAÚDE**: com a câmera ligada, o **rPPG** mede seus batimentos pela
+  variação sutil da cor da pele e mostra `XX BPM` num chip do HUD. Fale
+  `saúde` ou `meus batimentos` para ouvir o valor. O bem-estar também sugere
+  **pausas, hidratação e respiração** com base no batimento e no tempo de sessão.
+
+---
+
+## 15. Interface (HUD)
+
+- **Janela de comandos**: fale `mostrar comandos` (ou `mostra os comandos`, `quais
+  comandos existem`, `o que posso falar`) para abrir uma **janela com o catálogo
+  completo** — mais de 60 comandos organizados por categoria, com **busca em tempo
+  real** para filtrar. Feche com `fecha a janela de comandos` ou o botão **×**.
+  A janela é redimensionável, minimizável e maximizável como as outras.
+- **MEUS SITES (atalhos personalizados)**: no topo da janela de comandos há uma
+  seção para registrar **frase falada → URL** (ex.: "meu painel" →
+  `https://painel.com`). Depois de salvo, é só dizer `abre meu painel`,
+  `vai para meu painel` ou apenas `meu painel` — o ARES abre o site numa
+  **nova aba do navegador real do sistema**. Cada atalho tem botão de **abrir** (⧉) e **remover** (×), e
+  fica salvo entre sessões (localStorage).
+- **Painel de comandos**: barra **COMANDOS** no topo com botão de **recolher/expandir**
+  (ou por voz: `recolhe os controles` / `expande os controles`) — recolhido, só fica a
+  barra; o estado é lembrado entre sessões.
+- **Painel de voz**: indicador de estado (OUVINDO/PROCESSANDO/ESPERA), o que você falou,
+  a última resposta, e **chips de sugestão clicáveis** (o ARES sempre sugere algo
+  relevante para continuar — clique para enviar).
+- **Painel de log**: registro de ações executadas (com ícone, hora e resultado).
+- **Painel de memória editável**: adicione/remova itens de Você / Contatos / Fatos / Tarefas.
+- **Painel de voz (TTS)**: velocidade (0,5–2×), tom (−20 a +20 Hz) e voz masculina/feminina.
+- **Chips**: timers/lembretes ativos (contagem regressiva).
+- **Botões**: ATIVAR VOZ, MEMÓRIA, VOZ e ERROS.
+- **Visual (tema único HUD)**: orbe estritamente **preto e branco** — casca oca de **partículas brancas** girando em 360° (réplica do vídeo de referência, com morph e brilho que reagem à emoção), com o **núcleo no centro**: icosaedro subdividido + rede de partículas conectadas estilo sinapses (particles.js). Os temas coloridos antigos (âmbar/ciano/turquia) foram removidos.
+- **Janelas de app** (whatsapp, calendário, comandos, música): arrastar pela barra de título, **redimensionar pelo canto inferior direito** e minimizar / maximizar / fechar com o mouse. Sites/aplicativos externos abrem no **navegador real** do sistema (nova aba).
+
+---
+
+## 18b. Hermes — daemon de velocidade (segundo plano, oculto)
+
+O **Hermes** sobe junto com o servidor e roda oculto em segundo plano para
+deixar o ARES mais rápido, principalmente na primeira vez de cada recurso:
+
+- **Pré-aquecimento**: as bibliotecas do Office (Word/Excel/PowerPoint), o OCR
+  de leitura de tela (tesseract.js) e o modelo de IA (LLM) são carregados em
+  background — a primeira criação de documento, a primeira leitura de tela e a
+  primeira resposta deixam de gastar segundos.
+- **Cache inteligente**: resultados de busca na internet (3 min), previsão do
+  tempo (10 min), câmbio (5 min) e criptomoedas (2 min) são reaproveitados
+  quando você pergunta a mesma coisa de novo.
+- **Gestão de memória**: o cache é varrido a cada 60 s (entradas vencidas
+  saem) e o uso de memória é monitorado.
+
+Para desligar o aquecimento do modelo de IA (evitar uma chamada real a cada
+boot, útil em dev): `HERMES_LLM_WARM=0`. O aquecimento do Office e do OCR
+continua.
+
+| Fale | O que acontece |
+|---|---|
+| `status do hermes` / `como está o hermes` | O ARES resume o que foi aquecido, acertos do cache e memória em uso |
+
+No HUD, um chip discreto `HERMES ✓` mostra que o daemon está ativo (passa o
+mouse para ver detalhes). Nada disso trava o boot: se um aquecimento falhar,
+o servidor segue normal.
+
+---
+
+## 19. Limitações honestas
+
+- **Sincronização entre dispositivos** (anotações/tarefas/memória): hoje tudo fica
+  no `~/.ares/memory.json` local deste PC. Sincronizar com celular/outros PCs
+  exigiria um serviço de nuvem (Google Drive/OneDrive/Dropbox com conta).
+- **Assistente visual em tempo real** (reconhecer objetos na tela continuamente):
+  o ARES já lê a tela com OCR (tesseract) e clica em texto; "ver" imagens em
+  tempo real exigiria um modelo de visão (ex.: Qwen2.5-VL local via Ollama ou
+  Gemini Flash grátis na nuvem) — não é o modelo atual (DeepSeek, sem visão).
+- **Modelo local** (Ollama em CPU) é mais lento e simples que a nuvem;
+  respostas mais inteligentes com `KIWI_OLLAMA_API_KEY` (nuvem) ou `KIWI_CLOUD_URL/KEY/MODEL`.
+- **OCR e clique na tela** funcionam no Windows; o OCR precisa de um primeiro
+  download do modelo de idioma (português).
+- **Caixa de som** pode causar barge-in acidental (o microfone capta o próprio ARES);
+  use fone de ouvido.
+
+---
+
+## 20. Testes e verificação
+
+O projeto mantém uma suíte de testes de verificação em `test-*.ts` (TSX),
+gerada durante o desenvolvimento. Para executá-los, restaure os arquivos a
+partir do histórico do Git e rode com `npx tsx test-*.ts`; os exemplos
+gerados ficam em `test-out/` (ignorado pelo `.gitignore`).
+
+Validações rápidas do dia a dia:
+
+```bash
+npx tsc --noEmit   # typecheck do projeto inteiro
+npm run build      # build de produção (valida code-splitting e os dynamic imports)
+```
+---
+
+## 21. Atualizações automáticas (recebedor)
+
+Cada instalação do Arthemis pode receber implementações novas e instalá-las
+sozinha, com a IA avisando em voz **"Recebendo atualização…"** e depois
+"Atualização instalada.".
+
+### Como distribuir uma atualização (lado do desenvolvedor)
+
+1. Faça as implementações no projeto.
+2. Rode o publicador (calcula só o que mudou desde a última publicação):
+   ```bash
+   npx tsx scripts/publicar-atualizacao.ts          # versão = carimbo de data/hora
+   npx tsx scripts/publicar-atualizacao.ts --versao 1.2.3
+   ```
+   Ele gera `dist-atualizacao/` (ignorado pelo `.gitignore`) com
+   `manifest.json` + um arquivo por mudança (nomeado pelo SHA-256).
+3. Envie a pasta `dist-atualizacao` para qualquer host estático (GitHub
+   Pages, Netlify, VPS com nginx…).
+4. Em cada instalação, configure no `.env`:
+   ```
+   ARES_UPDATE_URL=https://SEU-HOST/dist-atualizacao
+   ARES_UPDATE_INTERVAL_MIN=45   # opcional (padrão 45 min)
+   ```
+
+### Como o recebedor funciona (lado de cada instalação)
+
+- No boot do servidor (`instrumentation.ts`), o poller checa o manifest a
+  cada 45 min (configurável) — primeiro check ~15s após subir.
+- `manifest.json` traz `versao`, `npm` (instalar dependências), `exigeReinicio`
+  e a lista de arquivos alterados com `caminho` + `sha256`.
+- O download vai para um staging; **cada arquivo é conferido pelo SHA-256
+  antes de tocar o projeto**. Caminhos protegidos (`.env`, `.freebuff/`,
+  `node_modules/`, `.next/`, `data/`, `.git/`, `.ares-update/`,
+  `dist-atualizacao/`) nunca são sobrescritos.
+- Se `npm: true`, roda `npm install`. Se `exigeReinicio`, o servidor
+  reinicia sozinho (janela minimizada, como o arthemis.bat) e a página
+  recarrega com o código novo.
+- Estado e erros: `GET /api/updates` (estado) e `POST /api/updates`
+  (verificar agora). O cliente polla e a IA vocaliza as transições.
+
+### Limitações honestas
+
+- **Sem `ARES_UPDATE_URL`, nada é baixado** — o sistema fica desligado.
+- A **âncora de confiança é o URL configurado**: ele define quem pode
+  instalar código na máquina (o SHA-256 impede corrupção/adulteração em
+  trânsito, mas o dono do host decide o que é publicado).
+- O servidor precisa estar de pé para receber a atualização; se estiver
+  desligado, a checagem acontece no próximo boot.

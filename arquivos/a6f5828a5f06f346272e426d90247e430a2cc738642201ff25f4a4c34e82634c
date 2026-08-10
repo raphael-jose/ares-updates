@@ -1,0 +1,281 @@
+/**
+ * Cliente MQTT 3.1.1 mínimo sobre WebSocket — usado apenas como transporte de
+ * SINALIZAÇÃO (presença + troca de oferta/resposta WebRTC). Nenhum conteúdo de
+ * mensagem passa por aqui; o chat em si continua 100% P2P (WebRTC direto).
+ *
+ * Implementado à mão (~sem dependências) porque o único papel é: conectar,
+ * assinar tópicos, publicar payloads pequenos e manter o keepalive.
+ * Funciona no navegador e no Node (WebSocket nativo dos dois).
+ */
+
+export interface MqttMensagem {
+  topic: string;
+  payload: Uint8Array;
+}
+
+export interface MqttWill {
+  topic: string;
+  payload: Uint8Array;
+  retain?: boolean;
+}
+
+export interface MqttOpcoes {
+  onConectado?: () => void;
+  onMensagem?: (m: MqttMensagem) => void;
+  onFechado?: (erro: boolean) => void;
+}
+
+const te = () => new TextEncoder();
+const td = () => new TextDecoder();
+
+function concat(partes: Uint8Array[]): Uint8Array {
+  const total = partes.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of partes) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+function packStr(s: string): Uint8Array {
+  const u = te().encode(s);
+  const out = new Uint8Array(2 + u.length);
+  out[0] = (u.length >> 8) & 0xff;
+  out[1] = u.length & 0xff;
+  out.set(u, 2);
+  return out;
+}
+
+function packU16(n: number): Uint8Array {
+  return new Uint8Array([(n >> 8) & 0xff, n & 0xff]);
+}
+
+/** Comprimento restante do MQTT (varint de 1–4 bytes). */
+function packLen(n: number): Uint8Array {
+  const out: number[] = [];
+  do {
+    let b = n % 128;
+    n = Math.floor(n / 128);
+    if (n > 0) b |= 0x80;
+    out.push(b);
+  } while (n > 0);
+  return new Uint8Array(out);
+}
+
+function pacote(tipo: number, body: Uint8Array): Uint8Array {
+  return concat([new Uint8Array([tipo]), packLen(body.length), body]);
+}
+
+/** CONNECT (sessão limpa, keepalive, LWT opcional). */
+function packetConnect(clientId: string, keepalive: number, will?: MqttWill): Uint8Array {
+  let flags = 0x02; // clean session
+  const corpo: Uint8Array[] = [packStr("MQTT"), new Uint8Array([4, flags]), packU16(keepalive), packStr(clientId)];
+  if (will) {
+    flags |= 0x04; // will flag
+    if (will.retain) flags |= 0x20;
+    corpo.push(packStr(will.topic), packU16(will.payload.length), will.payload);
+  }
+  const body = concat(corpo);
+  // Byte de flags fica no índice 7: nome "MQTT" (2+4) + level (1)
+  body[7] = flags;
+  return pacote(0x10, body);
+}
+
+function packetPublish(topic: string, payload: Uint8Array, retain: boolean): Uint8Array {
+  const flags = 0x30 | (retain ? 0x01 : 0x00); // QoS 0
+  return pacote(flags, concat([packStr(topic), payload]));
+}
+
+function packetSubscribe(packetId: number, topic: string): Uint8Array {
+  return pacote(0x82, concat([packU16(packetId), packStr(topic), new Uint8Array([0])])); // QoS 0
+}
+
+function packetPing(): Uint8Array {
+  return new Uint8Array([0xc0, 0x00]);
+}
+
+/** Acumula bytes e extrai pacotes MQTT completos. */
+class LeitorPacotes {
+  private buf: Uint8Array = new Uint8Array(0);
+
+  push(chunk: Uint8Array): Array<{ tipo: number; body: Uint8Array }> {
+    this.buf = concat([this.buf, chunk]);
+    const saida: Array<{ tipo: number; body: Uint8Array }> = [];
+    for (;;) {
+      const p = this.extrair();
+      if (!p) break;
+      saida.push(p);
+    }
+    return saida;
+  }
+
+  private extrair(): { tipo: number; body: Uint8Array } | null {
+    if (this.buf.length < 2) return null;
+    let mult = 1;
+    let len = 0;
+    let i = 1;
+    let ok = false;
+    for (; i < Math.min(this.buf.length, 5); i++) {
+      const b = this.buf[i];
+      len += (b & 0x7f) * mult;
+      if ((b & 0x80) === 0) {
+        ok = true;
+        i++;
+        break;
+      }
+      mult *= 128;
+    }
+    if (!ok) return null;
+    if (this.buf.length < i + len) return null;
+    const tipo = this.buf[0];
+    const body = this.buf.slice(i, i + len);
+    this.buf = this.buf.slice(i + len);
+    return { tipo, body };
+  }
+}
+
+function lerStr(u: Uint8Array, off: number): { s: string; next: number } {
+  const len = (u[off] << 8) | u[off + 1];
+  return { s: td().decode(u.subarray(off + 2, off + 2 + len)), next: off + 2 + len };
+}
+
+export class MqttCliente {
+  private ws: WebSocket | null = null;
+  private leitor = new LeitorPacotes();
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private reconTimer: ReturnType<typeof setTimeout> | null = null;
+  private tentativas = 0;
+  private manual = false;
+  private conectado = false;
+  private packetId = 1;
+  private assinados = new Set<string>();
+
+  constructor(
+    private url: string,
+    private clientId: string,
+    private cb: MqttOpcoes,
+    private will?: MqttWill,
+  ) {}
+
+  conectar(): void {
+    this.manual = false;
+    this.abrir();
+  }
+
+  private abrir(): void {
+    try {
+      const ws = new WebSocket(this.url);
+      ws.binaryType = "arraybuffer";
+      this.ws = ws;
+      ws.onopen = () => {
+        ws.send(packetConnect(this.clientId, 30, this.will));
+      };
+      ws.onmessage = (ev) => {
+        // binaryType = "arraybuffer": ev.data é sempre ArrayBuffer
+        const u = new Uint8Array(ev.data as ArrayBuffer);
+        this.leitor.push(u).forEach((p) => this.tratar(p.tipo, p.body));
+      };
+      ws.onclose = () => this.aoFechar();
+      ws.onerror = () => {
+        try {
+          ws.close();
+        } catch {
+          /* já fechado */
+        }
+      };
+    } catch {
+      this.aoFechar();
+    }
+  }
+
+  /** Envia SUBSCRIBE (e re-assina ao reconectar). */
+  assinar(topic: string): void {
+    this.assinados.add(topic);
+    if (this.conectado && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(packetSubscribe(this.packetId++, topic));
+    }
+  }
+
+  /** Publica QoS 0 (opcionalmente retida). */
+  publicar(topic: string, payload: Uint8Array, retain = false): void {
+    if (this.conectado && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(packetPublish(topic, payload, retain));
+    }
+  }
+
+  /** Fecha de vez (sem reconectar). */
+  fechar(): void {
+    this.manual = true;
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    if (this.reconTimer) clearTimeout(this.reconTimer);
+    this.pingTimer = null;
+    this.reconTimer = null;
+    try {
+      this.ws?.close();
+    } catch {
+      /* já fechado */
+    }
+    this.ws = null;
+    this.conectado = false;
+  }
+
+  get ativo(): boolean {
+    return this.conectado;
+  }
+
+  private tratar(tipo: number, body: Uint8Array): void {
+    switch (tipo >> 4) {
+      case 2: {
+        // CONNACK
+        if (body.length >= 2 && body[1] === 0) {
+          this.conectado = true;
+          this.tentativas = 0;
+          // Re-assina tudo que assinamos antes (sessão limpa)
+          this.assinados.forEach((t) => this.ws?.send(packetSubscribe(this.packetId++, t)));
+          this.pingTimer = setInterval(() => {
+            if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(packetPing());
+          }, 15000);
+          this.cb.onConectado?.();
+        } else {
+          this.aoFechar();
+        }
+        break;
+      }
+      case 3: {
+        // PUBLISH
+        try {
+          const { s: topic, next } = lerStr(body, 0);
+          this.cb.onMensagem?.({ topic, payload: body.slice(next) });
+        } catch {
+          /* payload malformado — ignora */
+        }
+        break;
+      }
+      case 9:
+      case 13:
+        // SUBACK / PINGRESP — sem ação
+        break;
+      default:
+        break;
+    }
+  }
+
+  private aoFechar(): void {
+    const estava = this.conectado;
+    this.conectado = false;
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
+    if (this.manual) {
+      this.cb.onFechado?.(false);
+      return;
+    }
+    this.tentativas++;
+    const atraso = Math.min(15000, 1000 * 2 ** Math.min(this.tentativas, 4));
+    this.reconTimer = setTimeout(() => this.abrir(), atraso);
+    this.cb.onFechado?.(estava);
+  }
+}
+
+

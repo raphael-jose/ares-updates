@@ -1,0 +1,385 @@
+/**
+ * Identidade criptográfica do ARES.
+ *
+ * Cada instalação possui UMA identidade real composta por:
+ *  - par de chaves ECDSA P-256  → assinatura (autenticação / anti-falsificação)
+ *  - par de chaves ECDH  P-256  → acordo de chaves (cripto de sessão E2E)
+ *
+ * O "nome amigável" exibido ao usuário é  `Nome#XXXX`. Por padrão XXXX são os
+ * 4 primeiros hex do fingerprint (SHA-256) da chave pública ECDH; o usuário
+ * pode escolher um sufixo próprio (ex.: `Raphael#966`) — ele é cosmético. O
+ * fingerprint é a âncora de confiança: duas instalações só são "a mesma IA" se
+ * tiverem o MESMO fingerprint — qualquer tentativa de usar o nome
+ * `ChatGPT#32B5` com outra chave é detectada na verificação de identidade
+ * (challenge-response).
+ *
+ * A chave privada NUNCA sai da máquina e é armazenada cifrada (PBKDF2-SHA256
+ * com 150k iterações + AES-GCM) sob senha do usuário. Depois de desbloqueada
+ * uma vez na sessão, as CryptoKeys ficam apenas em memória.
+ *
+ * Tudo usa WebCrypto (SubtleCrypto), suportado em todos os navegadores — não
+ * criamos criptografia própria.
+ */
+
+const ID_KEY = "ares-identidade";
+const PBKDF2_ITER = 150_000;
+
+export interface IdentidadeEstado {
+  criada: boolean;
+  desbloqueada: boolean;
+  nome: string;
+  fingerprint: string; // hex (64 chars)
+  idPublico: string; // "Nome#XXXX"
+  protegida: boolean; // tem senha (chave privada cifrada)
+}
+
+interface IdentidadePersistida {
+  v: 1;
+  nome: string;
+  fingerprint: string;
+  /** Sufixo escolhido pelo usuário ("XXXX" em Nome#XXXX). Opcional — sem ele, deriva do fingerprint. */
+  sufixo?: string;
+  dhPub: JsonWebKey; // pública ECDH
+  sigPub: JsonWebKey; // pública ECDSA
+  /** Privadas cifradas: ct = AES-GCM(JSON{ dhPriv, sigPriv }) */
+  salt: string; // base64
+  iv: string; // base64
+  ct: string; // base64
+}
+
+// ——— Estado em memória (somente após desbloqueio) ———
+let dhKey: CryptoKey | null = null; // ECDH P-256 (privada, memória)
+let sigKey: CryptoKey | null = null; // ECDSA P-256 (privada, memória)
+let estadoCache: IdentidadeEstado | null = null;
+
+const te = () => new TextEncoder();
+const td = () => new TextDecoder();
+
+function b64(bytes: ArrayBuffer | Uint8Array): string {
+  const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "";
+  for (const b of u) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function unb64(s: string): Uint8Array<ArrayBuffer> {
+  const bin = atob(s);
+  const u = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+
+function randBytes(n: number): Uint8Array<ArrayBuffer> {
+  const u = new Uint8Array(new ArrayBuffer(n));
+  crypto.getRandomValues(u);
+  return u;
+}
+
+/** Uint8Array tipado como BufferSource (TS 5.7 + lib.dom estrita). */
+function src(u: Uint8Array): ArrayBuffer {
+  return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer;
+}
+
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function deriveKeyDeSenha(senha: string, salt: Uint8Array): Promise<CryptoKey> {
+  const base = await crypto.subtle.importKey(
+    "raw",
+    te().encode(senha),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt: src(salt), iterations: PBKDF2_ITER },
+    base,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/** Fingerprint (SHA-256 hex) da chave pública ECDH. */
+export async function fingerprintDeJwk(jwk: JsonWebKey): Promise<string> {
+  // A chave é PÚBLICA — importa como extractable para poder calcular o
+  // fingerprint via exportKey("raw") (é exatamente por isso que o fingerprint
+  // pode ser recalculado por qualquer peer que conheça a chave pública).
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    [],
+  );
+  const raw = await crypto.subtle.exportKey("raw", key);
+  return sha256Hex(new Uint8Array(raw));
+}
+
+/** ID amigável: "Nome#XXXX". Sufixo customizado se existir; senão, 4 primeiros hex do fingerprint. */
+export function idAmigavelDeFingerprint(nome: string, fingerprint: string, sufixo?: string): string {
+  const codigo = (sufixo && sufixo.trim() ? sufixo.trim() : (fingerprint || "0000").slice(0, 4)).toUpperCase();
+  return `${nome}#${codigo}`;
+}
+
+function carregarPersistida(): IdentidadePersistida | null {
+  try {
+    const raw = window.localStorage.getItem(ID_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as IdentidadePersistida;
+    if (!p || p.v !== 1 || !p.fingerprint) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** Estado atual da identidade (sem expor nada secreto). */
+export function estadoIdentidade(): IdentidadeEstado {
+  if (estadoCache) {
+    return { ...estadoCache, desbloqueada: dhKey !== null && sigKey !== null };
+  }
+  const p = carregarPersistida();
+  if (!p) {
+    return { criada: false, desbloqueada: false, nome: "", fingerprint: "", idPublico: "", protegida: false };
+  }
+  const st: IdentidadeEstado = {
+    criada: true,
+    desbloqueada: dhKey !== null && sigKey !== null,
+    nome: p.nome,
+    fingerprint: p.fingerprint,
+    idPublico: idAmigavelDeFingerprint(p.nome, p.fingerprint, p.sufixo),
+    protegida: true,
+  };
+  estadoCache = st;
+  return st;
+}
+
+/**
+ * Cria a identidade da instalação (primeiro cadastro). O código #XXXX é
+ * gerado automaticamente a partir do fingerprint — o usuário NÃO o escolhe —
+ * a menos que passe um `sufixo` próprio (ex.: "966" → Raphael#966). O sufixo
+ * é cosmético; o fingerprint SHA-256 de 64 hex é a unicidade REAL, verificada
+ * criptograficamente na conexão.
+ */
+export async function criarIdentidade(
+  nome: string,
+  senha: string,
+  sufixo?: string,
+): Promise<{ ok: boolean; erro?: string }> {
+  if (carregarPersistida()) return { ok: false, erro: "A identidade já existe nesta instalação." };
+  const nomeLimp = nome.trim().slice(0, 24);
+  if (!nomeLimp) return { ok: false, erro: "Escolha um nome para a IA." };
+  if (senha.length < 4) return { ok: false, erro: "A senha precisa de pelo menos 4 caracteres." };
+  const sufixoNorm = sufixo?.trim().toUpperCase() ?? "";
+  if (sufixoNorm && !/^[A-Za-z0-9]{2,8}$/.test(sufixoNorm)) {
+    return { ok: false, erro: "O código #XXXX deve ter 2 a 8 letras/números (ex.: Raphael#966)." };
+  }
+
+  try {
+    // Gera os dois pares de chaves com aleatoriedade criptograficamente segura
+    const dh = await crypto.subtle.generateKey(
+      { name: "ECDH", namedCurve: "P-256" },
+      true,
+      ["deriveBits", "deriveKey"],
+    );
+    const sig = await crypto.subtle.generateKey(
+      { name: "ECDSA", namedCurve: "P-256" },
+      true,
+      ["sign", "verify"],
+    );
+
+    const dhPub = (await crypto.subtle.exportKey("jwk", dh.publicKey)) as JsonWebKey;
+    const sigPub = (await crypto.subtle.exportKey("jwk", sig.publicKey)) as JsonWebKey;
+    const dhPriv = (await crypto.subtle.exportKey("jwk", dh.privateKey)) as JsonWebKey;
+    const sigPriv = (await crypto.subtle.exportKey("jwk", sig.privateKey)) as JsonWebKey;
+
+    const fingerprint = await fingerprintDeJwk(dhPub);
+
+    // Cifra as privadas com a senha (PBKDF2 + AES-GCM)
+    const salt = randBytes(16);
+    const iv = randBytes(12);
+    const k = await deriveKeyDeSenha(senha, salt);
+    const payload = te().encode(JSON.stringify({ dhPriv, sigPriv }));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: src(iv) }, k, payload);
+
+    const persistida: IdentidadePersistida = {
+      v: 1,
+      nome: nomeLimp,
+      fingerprint,
+      ...(sufixoNorm ? { sufixo: sufixoNorm } : {}),
+      dhPub,
+      sigPub,
+      salt: b64(salt),
+      iv: b64(iv),
+      ct: b64(ct),
+    };
+    window.localStorage.setItem(ID_KEY, JSON.stringify(persistida));
+
+    // Mantém as chaves na memória da sessão
+    dhKey = await crypto.subtle.importKey(
+      "jwk",
+      dhPriv,
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      ["deriveBits", "deriveKey"],
+    );
+    sigKey = await crypto.subtle.importKey(
+      "jwk",
+      sigPriv,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["sign"],
+    );
+    estadoCache = null;
+    return { ok: true };
+  } catch (e) {
+    console.error("[identity] criar falhou:", e);
+    return { ok: false, erro: `Falha ao gerar as chaves criptográficas (${e instanceof Error ? e.message : String(e)}).` };
+  }
+}
+
+/** Desbloqueia a identidade com a senha (uma vez por sessão). */
+export async function desbloquearIdentidade(senha: string): Promise<{ ok: boolean; erro?: string }> {
+  const p = carregarPersistida();
+  if (!p) return { ok: false, erro: "Nenhuma identidade criada." };
+  try {
+    const k = await deriveKeyDeSenha(senha, unb64(p.salt));
+    const dec = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: src(unb64(p.iv)) },
+      k,
+      src(unb64(p.ct)),
+    );
+    const { dhPriv, sigPriv } = JSON.parse(td().decode(dec)) as {
+      dhPriv: JsonWebKey;
+      sigPriv: JsonWebKey;
+    };
+    dhKey = await crypto.subtle.importKey(
+      "jwk",
+      dhPriv,
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      ["deriveBits", "deriveKey"],
+    );
+    sigKey = await crypto.subtle.importKey(
+      "jwk",
+      sigPriv,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["sign"],
+    );
+    estadoCache = null;
+    return { ok: true };
+  } catch {
+    return { ok: false, erro: "Senha incorreta." };
+  }
+}
+
+/** Remove as chaves da memória (bloqueia a identidade). */
+export function bloquearIdentidade(): void {
+  dhKey = null;
+  sigKey = null;
+}
+
+/** Assina um texto com a chave privada ECDSA (exige identidade desbloqueada). */
+export async function assinarTexto(texto: string): Promise<string> {
+  if (!sigKey) throw new Error("Identidade bloqueada.");
+  const sig = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    sigKey,
+    te().encode(texto),
+  );
+  return b64(sig);
+}
+
+/** Verifica uma assinatura ECDSA com uma chave pública (JWK). */
+export async function verificarAssinatura(
+  pubSigJwk: JsonWebKey,
+  texto: string,
+  sigB64: string,
+): Promise<boolean> {
+  try {
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      pubSigJwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    return crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      src(unb64(sigB64)),
+      te().encode(texto),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deriva a chave de sessão AES-GCM (E2E) com a chave pública ECDH do peer,
+ * usando ECDH + HKDF-SHA256. A mesma sessão é derivada dos dois lados.
+ */
+export async function derivarSessao(peerDhPubJwk: JsonWebKey): Promise<CryptoKey> {
+  if (!dhKey) throw new Error("Identidade bloqueada.");
+  const peer = await crypto.subtle.importKey(
+    "jwk",
+    peerDhPubJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
+  const bits = await crypto.subtle.deriveBits({ name: "ECDH", public: peer }, dhKey, 256);
+  const hkdf = await crypto.subtle.importKey("raw", bits, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(16),
+      info: te().encode("ares-p2p-sessao-v1"),
+    },
+    hkdf,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/** Cifra um texto com AES-GCM (chave de sessão), com AAD = fingerprint do remetente. */
+export async function cifrarTexto(
+  chave: CryptoKey,
+  texto: string,
+  aad: string,
+): Promise<{ iv: string; ct: string }> {
+  const iv = randBytes(12);
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: src(iv), additionalData: te().encode(aad) },
+    chave,
+    te().encode(texto),
+  );
+  return { iv: b64(iv), ct: b64(ct) };
+}
+
+/** Decifra um texto AES-GCM (valida AAD + integridade). */
+export async function decifrarTexto(
+  chave: CryptoKey,
+  ivB64: string,
+  ctB64: string,
+  aad: string,
+): Promise<string> {
+  const dec = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: src(unb64(ivB64)), additionalData: te().encode(aad) },
+    chave,
+    src(unb64(ctB64)),
+  );
+  return td().decode(dec);
+}
+
+/** Chaves públicas da identidade desbloqueada (para o handshake/convite). */
+export function chavesPublicas(): { dhPub: JsonWebKey; sigPub: JsonWebKey } | null {
+  const p = carregarPersistida();
+  if (!p) return null;
+  return { dhPub: p.dhPub, sigPub: p.sigPub };
+}

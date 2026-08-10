@@ -1,0 +1,11 @@
+import { NextResponse } from "next/server";
+
+/**
+ * Expõe a URL do broker MQTT usado para SINALIZAÇÃO P2P (presença + aperto de
+ * mão WebRTC). Lida no servidor para não vazar segredos do .env ao bundle do
+ * navegador. Sem ARES_MQTT_URL, usa o broker público padrão (emqx).
+ */
+export async function GET() {
+  const url = process.env.ARES_MQTT_URL?.trim() || "wss://broker.hivemq.com:8884/mqtt";
+  return NextResponse.json({ url, brokerPublico: !process.env.ARES_MQTT_URL?.trim() });
+}
