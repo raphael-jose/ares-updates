@@ -1,10 +1,10 @@
 {
-  "versao": "20260810-174400",
+  "versao": "20260810-180732",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: envio de documentos pelo anexo (PDF, Word/Excel/PPT, texto, zip…) — o destinatário vê o card com o nome do arquivo e botão de baixar",
-    "Chat P2P: envio de vídeos pelo anexo confirmado — o caminho de fragmentação entrega vídeos grandes com player e confirmação de visualização"
+    "Performance: o orbe não renderiza mais com a janela minimizada ou escondida — economiza GPU/CPU (ótimo para hardware fraco) e elimina os avisos de erro do WebGL",
+    "Verificação completa das funcionalidades: chat P2P, voz, agenda, finanças, configurações, memória e feedback — tudo conferido e funcionando"
   ],
   "arquivos": [
     {
@@ -314,8 +314,8 @@
     },
     {
       "caminho": "lib/orbScene.ts",
-      "url": "arquivos/d6af5cf4a5f8281cf2168c9da3e7fbeb01dd352316f6c488c399a6100dcaeaa4",
-      "sha256": "d6af5cf4a5f8281cf2168c9da3e7fbeb01dd352316f6c488c399a6100dcaeaa4"
+      "url": "arquivos/d9ded54c487ff560659c7207dd66b54358c67c1e8ea0ef72a53a66af42739cc2",
+      "sha256": "d9ded54c487ff560659c7207dd66b54358c67c1e8ea0ef72a53a66af42739cc2"
     },
     {
       "caminho": "lib/publicador.ts",
