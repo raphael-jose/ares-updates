@@ -1,0 +1,191 @@
+/**
+ * Monitor de bem-estar do ARES (client-side).
+ *
+ * Combina o batimento cardíaco do rPPG (câmera) com o tempo de uso da sessão
+ * para gerar sugestões de saúde faladas em voz alta, espaçadas para não
+ * virar ruído:
+ *   - sessão longa → sugestão de pausa;
+ *   - a cada hora → hidratação;
+ *   - bpm alto (repouso) → respiração profunda;
+ *   - bpm baixo → levantar e se mexer.
+ *
+ * O HUD liga o monitor ao mesmo vídeo da câmera já usado pelo hand tracker e
+ * repassa onBpm do rPPG para `setBpm`. As sugestões são faladas pelo ARES.
+ */
+
+export type BpmClass = "normal" | "alto" | "baixo" | null;
+
+export interface WellnessSugestao {
+  texto: string;
+  icone: string;
+  nivel: "info" | "aviso";
+}
+
+export interface WellnessStatus {
+  bpm: number | null;
+  bpmClass: BpmClass;
+  sessaoMin: number;
+  bpmAmostras: number;
+  sugestoesHoje: number;
+}
+
+export interface WellnessCallbacks {
+  onSugestao(sugestao: WellnessSugestao): void;
+}
+
+// Limiares (repouso, câmera estática)
+const BPM_ALTO = 100;
+const BPM_BAIXO = 50;
+// Sugestões por tipo (tempo mínimo entre duas da MESMA categoria)
+const PAUSA_A_CADA_MIN = 50;
+const AGUA_A_CADA_MIN = 60;
+const RESPIRACAO_COOLDOWN_MIN = 20;
+const MEXER_COOLDOWN_MIN = 25;
+// Intervalo mínimo entre QUALQUER sugestão falada (não virar enxurrada)
+const FALA_COOLDOWN_MS = 8 * 60 * 1000;
+
+export class WellnessMonitor {
+  private callbacks: WellnessCallbacks;
+  private bpm: number | null = null;
+  private bpmAmostras = 0;
+  private bpmAcum = 0;
+  private bpmAltoDesde: number | null = null;
+  private bpmBaixoDesde: number | null = null;
+  private sessaoInicio = Date.now();
+  private ultimaSugestao = 0;
+  private sugestoesHoje = 0;
+  private ultimaPausaSugerida = 0;
+  private ultimaAguaSugerida = 0;
+  private ultimaRespSugerida = 0;
+  private ultimaMexerSugerida = 0;
+  private running = false;
+  private tickId: ReturnType<typeof setInterval> | null = null;
+
+  constructor(callbacks: WellnessCallbacks) {
+    this.callbacks = callbacks;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.sessaoInicio = Date.now();
+    this.tickId = setInterval(() => this.tick(), 60 * 1000); // 1/min
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.tickId) clearInterval(this.tickId);
+    this.tickId = null;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  /** O HUD chama a cada leitura do rPPG (várias por segundo). */
+  setBpm(bpm: number | null): void {
+    this.bpm = bpm;
+    if (bpm !== null && bpm > 20 && bpm < 220) {
+      this.bpmAmostras += 1;
+      this.bpmAcum += bpm;
+      if (bpm >= BPM_ALTO) {
+        if (this.bpmAltoDesde === null) this.bpmAltoDesde = Date.now();
+      } else {
+        this.bpmAltoDesde = null;
+      }
+      if (bpm <= BPM_BAIXO) {
+        if (this.bpmBaixoDesde === null) this.bpmBaixoDesde = Date.now();
+      } else {
+        this.bpmBaixoDesde = null;
+      }
+    }
+  }
+
+  getBpm(): number | null {
+    return this.bpm;
+  }
+
+  getStatus(): WellnessStatus {
+    const media = this.bpmAmostras > 0 ? Math.round(this.bpmAcum / this.bpmAmostras) : null;
+    const bpmClass: BpmClass =
+      media === null ? null : media >= BPM_ALTO ? "alto" : media <= BPM_BAIXO ? "baixo" : "normal";
+    return {
+      bpm: media,
+      bpmClass,
+      sessaoMin: Math.round((Date.now() - this.sessaoInicio) / 60000),
+      bpmAmostras: this.bpmAmostras,
+      sugestoesHoje: this.sugestoesHoje,
+    };
+  }
+
+  /** Força o início da sessão (usado quando a câmera é religada). */
+  resetSessao(): void {
+    this.sessaoInicio = Date.now();
+  }
+
+  /** Checagem manual (usada pelo teste). */
+  tick(): void {
+    if (!this.running) return;
+    const agora = Date.now();
+    const st = this.getStatus();
+    const sessaoMin = st.sessaoMin;
+
+    // Cooldown global: no mínimo 8 min entre sugestões faladas
+    if (agora - this.ultimaSugestao < FALA_COOLDOWN_MS) return;
+
+    // 1) Frequência cardíaca alterada por um período sustentado
+    const altoSustentado = this.bpmAltoDesde !== null && agora - this.bpmAltoDesde > 90 * 1000;
+    const baixoSustentado = this.bpmBaixoDesde !== null && agora - this.bpmBaixoDesde > 90 * 1000;
+    if (altoSustentado && agora - this.ultimaRespSugerida > RESPIRACAO_COOLDOWN_MIN * 60 * 1000) {
+      this.ultimaRespSugerida = agora;
+      this.ultimaSugestao = agora;
+      this.sugestoesHoje += 1;
+      this.callbacks.onSugestao({
+        nivel: "aviso",
+        icone: "bi-heart-pulse",
+        texto: `Seu batimento está em ${this.bpm} por minuto, um pouco alto para o repouso. Que tal respirar fundo por um minuto? Inspire pelo nariz contando até quatro, segure, e solte devagar.`,
+      });
+      return;
+    }
+    if (baixoSustentado && agora - this.ultimaMexerSugerida > MEXER_COOLDOWN_MIN * 60 * 1000) {
+      this.ultimaMexerSugerida = agora;
+      this.ultimaSugestao = agora;
+      this.sugestoesHoje += 1;
+      this.callbacks.onSugestao({
+        nivel: "info",
+        icone: "bi-activity",
+        texto: `Seu batimento está em ${this.bpm} por minuto, bem calmo. Se estiver há muito tempo parado, levante e dê uma volta rápida para ativar a circulação.`,
+      });
+      return;
+    }
+
+    // 2) Sessão longa → pausa
+    if (sessaoMin >= PAUSA_A_CADA_MIN && agora - this.ultimaPausaSugerida > PAUSA_A_CADA_MIN * 60 * 1000) {
+      this.ultimaPausaSugerida = agora;
+      this.ultimaSugestao = agora;
+      this.sugestoesHoje += 1;
+      this.callbacks.onSugestao({
+        nivel: "info",
+        icone: "bi-cup-hot",
+        texto: `Você está há ${sessaoMin} minutos em frente à tela. Que tal uma pausa de 5 minutos? Olhe para um ponto distante para descansar os olhos e alongue o pescoço e os ombros.`,
+      });
+      return;
+    }
+
+    // 3) Hidratação (a cada hora)
+    if (sessaoMin >= AGUA_A_CADA_MIN && agora - this.ultimaAguaSugerida > AGUA_A_CADA_MIN * 60 * 1000) {
+      this.ultimaAguaSugerida = agora;
+      this.ultimaSugestao = agora;
+      this.sugestoesHoje += 1;
+      this.callbacks.onSugestao({
+        nivel: "info",
+        icone: "bi-droplet",
+        texto: "Faz tempo que você não bebe água. Um copo agora ajuda a manter a concentração e evita dor de cabeça.",
+      });
+    }
+  }
+
+  dispose(): void {
+    this.stop();
+  }
+}
