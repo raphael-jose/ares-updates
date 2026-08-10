@@ -1,0 +1,38 @@
+import { NextResponse } from "next/server";
+import {
+  estadoPublicacao,
+  rodarScriptPublicacao,
+  empurrarParaGitHub,
+  versaoDoManifest,
+} from "@/lib/publicador";
+
+/**
+ * Botão "PUBLICAR ATUALIZAÇÃO" da interface (modo desenvolvedor).
+ * GET  → estado (disponível? repo? versão atual?)
+ * POST → gera o pacote (script) e envia para o GitHub.
+ */
+export async function GET() {
+  return NextResponse.json(estadoPublicacao());
+}
+
+export async function POST() {
+  const st = estadoPublicacao();
+  if (!st.disponivel) {
+    return NextResponse.json({ ok: false, mensagem: st.motivo ?? "Publicação indisponível." }, { status: 403 });
+  }
+  const script = await rodarScriptPublicacao();
+  if (!script.ok) {
+    return NextResponse.json(
+      { ok: false, mensagem: "Falha ao gerar o pacote de atualização.", saida: script.saida.slice(0, 2000) },
+      { status: 500 },
+    );
+  }
+  const push = await empurrarParaGitHub(st.repo!);
+  return NextResponse.json({
+    ok: push.ok,
+    mensagem: push.mensagem,
+    enviados: push.enviados,
+    versao: versaoDoManifest(),
+    saida: script.saida.slice(-800),
+  });
+}
