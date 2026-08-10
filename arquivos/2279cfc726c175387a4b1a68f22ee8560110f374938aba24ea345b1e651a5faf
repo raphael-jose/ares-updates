@@ -1,0 +1,161 @@
+/**
+ * Rotinas por voz: "boa noite" e "bom dia" executam uma SEQUÊNCIA de comandos
+ * já existentes (fechar apps, agendar, resumir a agenda) — sempre com
+ * confirmação por voz antes de executar.
+ *
+ * Uma rotina é uma lista de passos; cada passo é um ToolCall comum com um
+ * rótulo amigável. A confirmação é enfileirada no executor (queueRoutine) e
+ * executada no /api/confirm como uma ação pendente normal — mas roda TODOS os
+ * passos em sequência e devolve um log por passo.
+ */
+import type { AgentResult, ToolCall } from "./types";
+import { queueRoutine } from "./executor";
+import { getMemorySnapshot } from "./memory";
+
+export interface RoutineStep {
+  /** Rótulo curto para o log do HUD (ex.: "fechar o chrome"). */
+  label: string;
+  call: ToolCall;
+}
+
+export interface Routine {
+  id: string;
+  /** Nome falado (ex.: "boa noite"). */
+  nome: string;
+  /** Descrição da sequência para a pergunta de confirmação. */
+  descricao: string;
+  icone: string;
+  /** Monta os passos na hora (permite ler memória, ex.: cidade do clima). */
+  buildSteps: () => RoutineStep[];
+}
+
+/** Rotina da noite: fecha apps, agenda o despertador e resume a agenda de amanhã. */
+function buildBoaNoiteSteps(): RoutineStep[] {
+  const steps: RoutineStep[] = [
+    { label: "fechar o chrome", call: { tool: "window_control", args: { acao: "fechar", janela: "chrome" } } },
+    { label: "fechar o spotify", call: { tool: "window_control", args: { acao: "fechar", janela: "spotify" } } },
+    { label: "fechar o discord", call: { tool: "window_control", args: { acao: "fechar", janela: "discord" } } },
+    { label: "agendar o despertador de amanhã", call: { tool: "add_agenda", args: { texto: "despertador amanhã às 07:00" } } },
+    { label: "resumir a agenda de amanhã", call: { tool: "list_agenda", args: { filtro: "amanha" } } },
+  ];
+  return steps;
+}
+
+/** Rotina da manhã: resume a agenda de hoje e fala o clima (se a cidade estiver na memória). */
+function buildBomDiaSteps(): RoutineStep[] {
+  const steps: RoutineStep[] = [
+    { label: "resumir a agenda de hoje", call: { tool: "list_agenda", args: { filtro: "hoje" } } },
+  ];
+  const cidade = getMemorySnapshot().usuario["cidade"]?.trim();
+  if (cidade) {
+    steps.push({ label: "falar o clima", call: { tool: "weather", args: { cidade } } });
+  }
+  return steps;
+}
+
+export const ROTINAS: Routine[] = [
+  {
+    id: "boa_noite",
+    nome: "boa noite",
+    icone: "bi-moon-stars",
+    descricao:
+      "fechar o chrome, o spotify e o discord, agendar o despertador para amanhã às 7h e resumir a sua agenda de amanhã",
+    buildSteps: buildBoaNoiteSteps,
+  },
+  {
+    id: "bom_dia",
+    nome: "bom dia",
+    icone: "bi-sunrise",
+    descricao: "resumir a sua agenda de hoje e falar o clima",
+    buildSteps: buildBomDiaSteps,
+  },
+];
+
+const ROTINA_LIST_WORDS =
+  /^(?:quais|lista|liste|listar|mostra|mostre|mostrar|o que são|o que sao)\s+(?:(?:as|de)\s+|as\s+suas\s+|as\s+minhas\s+|de\s+rotinas?\s+)?(?:rotinas?|sequencias|sequências)\s*(?:existem|voc[êe] tem|eu tenho|dispon[ií]veis)?[.!?;:]*$/i;
+const ROTINA_RUN_WORDS =
+  /^(?:executa|execute|executar|roda|rode|rodar|ativa|ative|ativar|faz|faça|faca|começa|comece|inicia|inicie)\s+(?:a\s+|a\s+rotina\s+)?(?:rotina\s+)?(.+)$/i;
+
+/** Frases curtas exatas: "boa noite" / "bom dia" (sozinhas) disparam a rotina. */
+const BOA_NOITE_EXACT = /^(?:boa noite|boa noite ares|boa noite ares\.?|boa noite!?)$/i;
+const BOM_DIA_EXACT = /^(?:bom dia|bom dia ares|bom dia ares\.?|bom dia!?)$/i;
+
+/** Acha uma rotina pelo nome falado (parcial, case-insensitive). */
+export function findRoutine(nome: string): Routine | null {
+  const n = (nome ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (!n) return null;
+  return (
+    ROTINAS.find((r) => r.nome.replace(/[\u0300-\u036f]/g, "") === n) ??
+    ROTINAS.find((r) => r.nome.includes(n) || n.includes(r.nome)) ??
+    null
+  );
+}
+
+/** Texto falado listando as rotinas disponíveis. */
+export function listRoutinesText(): string {
+  if (!ROTINAS.length) return "Ainda não tenho rotinas definidas.";
+  const lines = ROTINAS.map((r) => `• ${r.nome}: ${r.descricao}`).join("\n");
+  return `Tenho estas rotinas:\n${lines}`;
+}
+
+/** Monta a pergunta de confirmação e enfileira a rotina no executor. */
+export function queueRoutineForConfirm(
+  routine: Routine,
+): { reply: string; needsConfirmation: { token: string; action: string } } {
+  const steps = routine.buildSteps();
+  const { token, action } = queueRoutine(steps, routine.descricao);
+  return {
+    reply: `Posso executar a rotina ${routine.nome}? Vou ${action}. Diga sim para confirmar.`,
+    needsConfirmation: { token, action },
+  };
+}
+
+/**
+ * Reconhece um pedido de rotina por voz e devolve a resposta pronta (com
+ * confirmação pendente) ou null se a frase não for de rotina.
+ */
+export async function routineCommand(text: string): Promise<AgentResult | null> {
+  const t = (text ?? "").trim();
+
+  // Listar rotinas
+  if (ROTINA_LIST_WORDS.test(t)) {
+    return { reply: listRoutinesText() };
+  }
+
+  // "executa a rotina boa noite" / "roda a rotina bom dia" / "ativa a rotina X"
+  const run = t.match(ROTINA_RUN_WORDS);
+  if (run) {
+    const alvo = (run[1] ?? "").trim().replace(/^rotina\s+/i, "").replace(/[.,!?;:]+$/, "");
+    const routine = findRoutine(alvo);
+    if (routine) {
+      const pending = queueRoutineForConfirm(routine);
+      return { reply: pending.reply, needsConfirmation: pending.needsConfirmation };
+    }
+    if (/rotina/i.test(t)) {
+      return { reply: `Não conheço a rotina "${alvo}". Tenho: ${ROTINAS.map((r) => r.nome).join(", ")}.` };
+    }
+    return null;
+  }
+
+  // Frase curta exata: "boa noite" / "bom dia" → rotina (a confirmação permite cancelar)
+  if (BOA_NOITE_EXACT.test(t)) {
+    const routine = findRoutine("boa noite");
+    if (routine) {
+      const pending = queueRoutineForConfirm(routine);
+      return { reply: pending.reply, needsConfirmation: pending.needsConfirmation };
+    }
+  }
+  if (BOM_DIA_EXACT.test(t)) {
+    const routine = findRoutine("bom dia");
+    if (routine) {
+      const pending = queueRoutineForConfirm(routine);
+      return { reply: pending.reply, needsConfirmation: pending.needsConfirmation };
+    }
+  }
+
+  return null;
+}
