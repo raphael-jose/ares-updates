@@ -1,0 +1,1469 @@
+import { cancelSpeech, createVoiceListener, setSpeechBlocked, speak, type VoiceListener } from "./voice";
+import { getInstanceId } from "./agent/peer";
+import { estadoIdentidade } from "./agent/identity";
+import type { AgentResult, LogEntry } from "./agent/types";
+import {
+  adjustHumorLevel,
+  analyzeSentiment,
+  getHumor,
+  getHumorLevel,
+  humorLabel,
+  sentimentContext,
+  setHumorLevel,
+  updateHumor,
+  type Humor,
+} from "./sentiment";
+export interface TimerInfo {
+  id: string;
+  /** Ex.: "timer" (mostra a duração) ou o texto do lembrete. */
+  label: string;
+  kind: "timer" | "reminder";
+  /** Timestamp (ms) em que dispara. */
+  endsAt: number;
+  /** Duração total em ms. */
+  totalMs: number;
+}
+
+export interface AssistantCallbacks {
+  onListening(listening: boolean): void;
+  onTranscript(text: string): void;
+  onReply(reply: string): void;
+  onLog(entry: LogEntry): void;
+  onBusy(busy: boolean): void;
+  /** Disparado enquanto existe uma ação aguardando confirmação por voz. */
+  onConfirming(confirming: boolean): void;
+  /** Pediu para o usuário digitar (URL/@) na caixa de texto da interface. */
+  onRequestInput?(): void;
+  /** Abre/fecha painéis do HUD por voz (calendário/agenda, whatsapp). */
+  onPanel?(painel: "calendario" | "whatsapp", acao: "abrir" | "fechar"): void;
+  /** Abre uma URL no navegador real do sistema (atalhos personalizados de sites). */
+  onOpenUrl?(url: string): void;
+  /** Recolhe/expande o painel de comandos do HUD (collapse). */
+  onControlsCollapse?(collapsed: boolean): void;
+  /** Abre/fecha a janela de catálogo de comandos no HUD ("mostrar comandos"). */
+  onComandos?(abrir: boolean): void;
+  /** Abre/fecha a janela REGISTRO DE AÇÕES (tabela de falhas — "exibir log de erros"). */
+  onErros?(abrir: boolean): void;
+  /** Player de áudio do HUD: abrir com busca ("tocar músicas do X"), fechar ou controlar (play/pause/próxima/anterior/volume). */
+  onMusic?(acao: MusicAction): void;
+  /** Liga/desliga a câmera do HUD (hand tracking + rPPG). */
+  onCamera?(acao: "abrir" | "fechar"): void;
+  /** Ativa/desativa o modo interface (mãos controlam a UI). */
+  onInterfaceMode?(on: boolean): void;
+  /** Pede o status de saúde (batimentos pela câmera) para ser falado. */
+  onSaudeStatus?(): void;
+  onError(): void;
+  /** Lista atual de timers/lembretes ativos (para o chip HUD). */
+  onTimers?(timers: TimerInfo[]): void;
+  /** Disparado quando um timer/lembrete termina (para alarme/toque na UI). */
+  onTimerFired?(timer: TimerInfo): void;
+  /** Sugestões relevantes da resposta (chips clicáveis no painel de voz). */
+  onSuggestions?(sugestoes: string[]): void;
+  /** Humor detectado do usuário (análise de sentimento local). */
+  onHumor?(humor: Humor, label: string): void;
+  /** Nível de humor/sarcasmo do ARES ajustado (0–100%) — para a UI acompanhar. */
+  onHumorLevel?(nivel: number): void;
+  /** Abre/fecha o chat P2P (fluxo de convite entre IAs). */
+  onPeer?(acao: "abrir" | "fechar"): void;
+  /** Abre o modal de identidade criptográfica. */
+  onIdentidade?(): void;
+  /** Abre/fecha a planilha de finanças do HUD. */
+  onFinance?(abrir: boolean): void;
+  /** Abre/fecha o chat P2P do HUD (contatos e conversas). */
+  onChat?(abrir: boolean): void;
+}
+
+export interface Assistant {
+  start(): void;
+  stop(): void;
+  isListening(): boolean;
+  /** Envia um comando de texto direto, como se tivesse sido falado. */
+  send(text: string): void;
+  /** Fala uma mensagem (respeita o mudo “sem som”). */
+  speak(text: string): void;
+  /** Lista de timers/lembretes ativos. */
+  getTimers(): TimerInfo[];
+}
+
+// Aceita variações comuns de fala: “sim”, “pode”, “sim pode apagar”, “ok” etc.
+const CONFIRM_WORDS = /^(sim|claro|confirmo|confirmar|pode|pode apagar|pode ir|ok|okay|tudo bem|vai|sim pode)\b/i;
+const CANCEL_WORDS = /^(nao|não|cancela|cancelar|pare)\b/i;
+
+// Comando de mudo: corta o ARES quando ele estiver falando e silencia as próximas falas.
+const MUTE_WORDS =
+  /^(sem som|sem áudio|sem audio|corta o som|corta a voz|cala a boca|cala-te|cala-te|cala boca|cale a boca|silêncio|silencio|fique calado|fica quieto|pare de falar|para de falar|não fala mais|nao fala mais|mudo|mute|silenciar)\b/i;
+const UNMUTE_WORDS =
+  /^(com som|abre o som|ativa o som|ativa o áudio|ativa o audio|volta a falar|fale novamente|fala novamente|desmutar|desmuta|destrava a voz)\b/i;
+
+// Pedido para digitar algo (URL/@) na caixa de texto da interface
+const TYPE_REQUEST_WORDS =
+  /^(quero digitar|vou digitar|quero colar|vou colar|quero escrever|vou escrever|abre o campo de texto|abre o campo de digitação|abre o teclado|modo digitação|modo de digitação|digite aqui|digitar aqui)\b/i;
+
+/** Ações de voz do player de áudio do HUD (música do YouTube — só áudio). */
+export type MusicAction =
+  | { tipo: "abrir"; query: string }
+  | { tipo: "fechar" }
+  | { tipo: "controle"; acao: "play" | "pause" | "proxima" | "anterior" | "volume"; valor?: number };
+
+// ——— Atalhos personalizados de sites (janela COMANDOS → MEUS SITES) ———
+// O usuário registra "frase falada → URL" na interface; aqui esses atalhos são
+// casados por voz ("abre meu painel", "vai para meu painel" ou só "meu painel").
+export interface SiteAtalho {
+  nome: string;
+  url: string;
+}
+
+const CUSTOM_SITES_KEY = "ares-custom-sites";
+
+/** Lê os atalhos personalizados salvos no localStorage (vazio no servidor). */
+export function getCustomSites(): SiteAtalho[] {
+  try {
+    if (typeof window === "undefined") return [];
+    const raw = window.localStorage.getItem(CUSTOM_SITES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (e): e is SiteAtalho =>
+          !!e && typeof e === "object" && typeof (e as SiteAtalho).nome === "string" && typeof (e as SiteAtalho).url === "string",
+      )
+      .map((e) => ({ nome: e.nome.trim(), url: e.url.trim() }))
+      .filter((e) => e.nome && e.url);
+  } catch {
+    return [];
+  }
+}
+
+/** Minúsculas + sem acentos, para casar com a transcrição de voz. */
+function normWord(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+// ——— Entendimento da fala: cortesia, gagueira e ruído ———
+// Palavras de cortesia não fazem parte da intenção: o usuário pede uma ação
+// e acrescenta "por favor"/"obrigado" no fim — isso nunca pode entrar numa
+// agenda, memória, tarefa, nota ou no texto enviado ao modelo.
+const POLITENESS_RE =
+  /\b(?:muito\s+obrigad[oa]s?|por\s+favor|porfavor|obrigad[oa]s?|obrigad[aã]o|brigad[oa]s?|brigad[aã]o|obrigad[íi]ssim[oa]s?|agradecid[oa]s?|agrade[çc]o(?:-lhe)?|valeu|gr[ãa]t[oa]s?|gratid[ãa]o|\bpv?f\b|pfvr|pfv)\b/gi;
+
+/**
+ * Limpa a fala do usuário antes de qualquer interpretação:
+ * - remove palavras de cortesia ("por favor", "obrigado", "valeu"…);
+ * - colapsa repetições consecutivas de palavras (gagueira/erro do
+ *   reconhecimento: "eu eu quero criar criar" vira "eu quero criar");
+ * - limpa pontuação sobrante e espaços duplos.
+ * A intenção é preservada; os ruídos de fala não entram em agenda/memória.
+ */
+export function normalizeUtterance(raw: string): string {
+  let s = (raw ?? "").trim();
+  if (!s) return "";
+  s = s.replace(POLITENESS_RE, " ");
+  // Pontuação de sentença (vírgulas, exclamações…) → espaço; pontos dentro de
+  // nomes ("texto.txt") são preservados
+  s = s.replace(/[,;.!?…]+(?=\s|$)/g, " ");
+  // Gagueira/repetição: "eu eu quero" → "eu quero"
+  s = s.replace(/\b([\p{L}]+)\b(?:(?:\s+|\s*[.,!?;:]+\s*)\1\b)+/giu, "$1");
+  s = s.replace(/^[,;:!?…]+/, "").replace(/[,;:!?….]+$/, "");
+  s = s.replace(/\s{2,}/g, " ").trim();
+  return s;
+}
+
+// Fala de fundo/solta (interjeições e confirmações rápidas) que não deve
+// acionar o núcleo nem gerar resposta — a menos que seja sim/não de uma
+// confirmação pendente (tratada antes deste filtro).
+const NOISE_ACK_WORDS = new Set([
+  "ah", "a", "e", "é", "o", "u", "oh", "hmm", "hm", "hum", "uh", "hã", "ahn",
+  "tá", "tá bom", "ta", "ta bom", "beleza", "blz", "ok", "okay", "opa", "eita",
+  "vixe", "oxe", "bah", "perfeito", "exato", "exatamente", "isso", "isso mesmo",
+  "tranquilo", "certo", "fechado", "fechou", "anotado", "entendi", "entendido",
+  "entendeu", "vai", "legal", "top", "massa", "show", "demais", "bora", "nada",
+  "gente", "senhor", "meu", "cara", "x", "nt",
+]);
+const GREETING_RE =
+  /^(?:oi|ó|ola|hey|e ai|eai|ei|bom dia|boa tarde|boa noite|alo)\b/i;
+
+/** True se a frase é só ruído/interjeição (não é uma pergunta nem um pedido). */
+export function isNoiseUtterance(raw: string): boolean {
+  const s = normalizeUtterance(raw);
+  if (!s) return false;
+  const puro = s.toLocaleLowerCase("pt-BR").replace(/[.,!?…;:]$/, "").trim();
+  if (NOISE_ACK_WORDS.has(puro)) return true;
+  // Letra única repetida ("aaaa", "ehhh"…) — só ruído
+  if (/^([a-záàâãéêíóôõúùüç])\1{2,}$/i.test(puro)) return true;
+  // Fragmentos minúsculos do reconhecimento ("ta", "aa"…) — mas nunca saudações
+  // nem as confirmações "sim"/"não" (que respondem a uma pergunta pendente)
+  if (
+    puro.length <= 3 &&
+    puro !== "sim" &&
+    puro !== "não" &&
+    puro !== "nao" &&
+    /^[a-záàâãéêíóôõúûçü]+$/i.test(puro) &&
+    !GREETING_RE.test(s)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** True quando a frase é APENAS um agradecimento ("obrigado", "valeu"). */
+export function isGratitude(raw: string): boolean {
+  const b = (raw ?? "").trim();
+  if (!b) return false;
+  if (!/^(?:(?:muito\s+)?(?:obrigad[oa][sç]?|obrigad[aã]o|brigad[oa]s?|brigad[aã]o|valeu|agradecid[oa]s?|agrade[çc]o|gr[ãa]t[oa]s?)[.!?,]?\s*)+$/i.test(b)) {
+    return false;
+  }
+  return normalizeUtterance(b).length === 0;
+}
+
+/**
+ * Casa a frase falada com um atalho de site salvo: "abre meu painel",
+ * "vai para o meu painel", "abre a página meu painel" ou só "meu painel".
+ * Exported para os testes de roteamento.
+ */
+export function matchCustomSite(trimmed: string): SiteAtalho | null {
+  const sites = getCustomSites();
+  if (sites.length === 0) return null;
+  const fala = normWord(trimmed).replace(/[.,;!?]+$/g, "");
+  if (!fala) return null;
+  const verbs =
+    "(?:abre|abra|abrir|acessa|acesse|acessar|vai\\s+para|v[aá]\\s+para|va\\s+para|ir\\s+para|mostra|mostre|exibe|exiba|abre\\s+o|abrir\\s+o|abre\\s+a|abrir\\s+a)";
+  for (const site of sites) {
+    const nome = normWord(site.nome);
+    if (!nome) continue;
+    const esc = nome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(
+      `^${verbs}\\s+(?:o\\s+|a\\s+|site\\s+|p[aá]gina\\s+|portal\\s+|plataforma\\s+)?${esc}$`,
+    );
+    if (pattern.test(fala) || fala === nome) return site;
+  }
+  return null;
+}
+
+// Comandos de voz do NÍVEL DE HUMOR/SARCASMO do ARES (0–100%)
+// (exportados para os testes de roteamento)
+export const HUMOR_SERIO_WORDS =
+  /^(?:modo\s+s[ée]rio|modo\s+s[ée]ria|sem\s+sarcasmo|sem\s+humor|humor\s+zero|zero\s+humor|modo\s+profissional|n[ãa]o\s+use\s+humor)$/i;
+export const HUMOR_MAXIMO_WORDS =
+  /^(?:modo\s+brincalh[ãa]o|modo\s+brincalhona|m[áa]ximo\s+sarcasmo|sarcasmo\s+m[áa]ximo|humor\s+m[áa]ximo|m[áa]ximo\s+humor)$/i;
+export const HUMOR_MAIS_WORDS =
+  /^(?:aumenta|aumente|sobe|suba|eleva|eleve|mais)\s+(?:o\s+)?(?:seu\s+)?(?:sarcasmo|humor)\b.*$/i;
+export const HUMOR_MENOS_WORDS =
+  /^(?:diminui|diminua|abaixa|abaixe|baixa|baixe|reduz|reduza|menos)\s+(?:o\s+)?(?:seu\s+)?(?:sarcasmo|humor)\b.*$/i;
+export const HUMOR_PCT_WORDS =
+  /^(?:deixa|deixe|define|defina|ajusta|ajuste|seta|sete|bota|coloca|coloque|p[õo]e|p[õo]e\s+l[áa])\s+(?:o\s+)?(?:seu\s+|meu\s+)?(?:humor|sarcasmo|n[íi]vel\s+de\s+humor)\s+(?:em|para|no|na|de)\s+(\d{1,3})\s*(?:%|por\s+cento|porcento)?\b.*$/i;
+export const HUMOR_STATUS_WORDS =
+  /^(?:qual\s+(?:é\s+)?o\s+(?:seu\s+)?n[íi]vel\s+de\s+humor|quanto\s+(?:t[áa]\s+)?de\s+humor\s+voc[êe]\s+tem|em\s+quanto\s+est[áa]\s+o\s+seu\s+humor|quanto\s+de\s+sarcasmo|qual\s+o\s+seu\s+n[íi]vel\s+de\s+sarcasmo)\s*\??$/i;
+
+// Comandos de voz da janela WHATSAPP do HUD (sessão real do whatsapp-web.js)
+// (exportados para os testes de roteamento). Guarda: "abre o whatsapp e manda…"
+// é envio de mensagem (builtin), não abertura de painel.
+export const WHATSAPP_OPEN_WORDS =
+  /^(?:abre|abrir|mostra|mostre|exibe|exiba|liga|ativa|ative|abre\s+o\s+painel|mostra\s+o\s+painel)\s+(?:o\s+|a\s+|o\s+painel\s+do\s+|o\s+painel\s+de\s+)?(?:whatsapp|zap|zapzap|whatsapp\s+web)(?:\s+(?:no|no\s+hud))?\b(?!\s+(?:e\s+)?(?:manda|mande|envia|envie|mandar|enviar)\b)/i;
+export const WHATSAPP_CLOSE_WORDS =
+  /^(?:fecha|feche|fechar|esconde|esconda|oculta|oculte|sai\s+da|saia\s+da|sai\s+do|saia\s+do)\s+(?:a\s+|o\s+|o\s+painel\s+do\s+|o\s+painel\s+de\s+)?(?:janela\s+de\s+)?(?:whatsapp|zap|zapzap|whatsapp\s+web)\b/i;
+
+// Comandos de voz da janela CALENDÁRIO do HUD (agenda sincronizada com a memória)
+// (exportados para os testes de roteamento)
+export const CALENDAR_OPEN_WORDS =
+  /^(?:abre|abrir|mostra|mostre|exibe|exiba|liga|ativa|ative|atualiza|atualize)\s+(?:(?:a|o)\s+)?(?:calend[aá]rio|calend[aá]rio\s+de\s+compromissos|agenda|minha\s+agenda)\b/i;
+export const CALENDAR_CLOSE_WORDS =
+  /^(?:fecha|feche|fechar|esconde|esconda|oculta|oculte|sai\s+da|saia\s+da|sai\s+do|saia\s+do)\s+(?:(?:a|o)\s+)?(?:janela\s+de\s+)?(?:calend[aá]rio|agenda|calend[aá]rio\s+de\s+compromissos)\b/i;
+
+// Comandos de voz de recolher/expandir o painel de comandos (collapse)
+export const CONTROLS_COLLAPSE_WORDS =
+  /^(?:recolhe|recolha|recolher|esconde|esconda|oculta|oculte|minimiza|minimize|fecha|feche)\s+(?:(?:o|a|os|as)\s+)?(?:painel de comandos|painel de comando|painel de controle|painel de controles|painel hud|comandos|controles)\b/i;
+export const CONTROLS_EXPAND_WORDS =
+  /^(?:expande|expanda|expandir|mostra|mostre|abre|abra|exibe|exiba|maximiza|maximize)\s+(?:(?:o|a|os|as)\s+)?(?:painel de comandos|painel de comando|painel de controle|painel de controles|painel hud|comandos|controles)\b/i;
+
+// Janela de catálogo de comandos: cobre a fala real (o reconhecimento de voz
+// transcreve "mostrar comandos" de vários jeitos, inclusive no singular):
+//   "mostrar comandos" · "mostra a lista de comandos" · "lista de comandos"
+//   "abre a lista de comando" · "quais comandos eu tenho / você conhece" …
+// Guardas: "abre os comandos" e "expande os comandos" NÃO abrem o catálogo —
+// continuam pertencendo ao expandir do painel de controles (CONTROLS_EXPAND_WORDS),
+// que roda depois deste handler.
+export const COMANDOS_OPEN_WORDS =
+  /^(?:(?:me\s+)?(?:mostra|mostre|mostrar|exibe|exiba|exibir|lista|liste|listar))\s+(?:(?:os|todos\s+os|todos|de)\s+|(?:a\s+)?lista\s+de\s+)?comandos?\b|^(?:abre|abra|abrir)\s+(?:a\s+)?lista\s+de\s+comandos?\b|^(?:quais\s+(?:s[ãa]?o\s+)?(?:os\s+|todos\s+os\s+)?comandos(?!\s+do\b)(?:\s+(?:existem|dispon[ií]veis|eu\s+tenho|voc[êe]\s+(?:tem|conhece|sabe)))?)|^(?:o\s+que\s+posso\s+falar|o\s+que\s+voc[êe]\s+sabe\s+fazer|o\s+que\s+voc[êe]\s+consegue\s+fazer)\b/i;
+export const COMANDOS_CLOSE_WORDS =
+  /^(?:fecha|feche|fechar|esconde|esconda|oculta|oculte|sai\s+da)\s+(?:(?:a|o|os|as)\s+)?(?:janela\s+de\s+|lista\s+de\s+)?comandos\b/i;
+
+// Comandos de voz da janela REGISTRO DE AÇÕES (tabela de falhas)
+// (exportados para os testes de roteamento)
+export const ERROS_OPEN_WORDS =
+  /^(?:(?:exibe|exiba|exibir|mostra|mostre|mostrar|abre|abra|abrir|lista|liste|listar|me\s+mostra|me\s+mostre)\s+(?:(?:o|a|os|as)\s+)?(?:log\s+de\s+erros|log\s+de\s+erro|registro\s+de\s+a[çc][õo]es|registro\s+de\s+erros|erros\s+registrados|a[çc][õo]es\s+do\s+ares|an[aá]lise\s+de\s+a[çc][õo]es|an[aá]lise\s+de\s+erros|erros))|^(?:an[aá]lise\s+de\s+a[çc][õo]es|an[aá]lise\s+de\s+erros|registro\s+de\s+a[çc][õo]es|log\s+de\s+erros)\b/i;
+export const ERROS_CLOSE_WORDS =
+  /^(?:fecha|feche|fechar|esconde|esconda|oculta|oculte|sai\s+da|saia\s+da)\s+(?:(?:janela\s+de\s+|a\s+|o\s+|os\s+|as\s+)?(?:registro\s+de\s+a[çc][õo]es|registro\s+de\s+erros|log\s+de\s+erros|erros))\b/i;
+
+// Comandos de voz da CÂMERA do HUD (hand tracking + rPPG), do modo interface
+// (mãos controlam a UI) e do chip de saúde (batimentos) — exportados para os
+// testes de roteamento.
+export const CAMERA_ABRIR_WORDS =
+  /^(?:mostra|mostre|mostrar|abre|abra|abrir|liga|ligue|ligar|ativa|ative|ativar)\s+(?:(?:a|o)\s+)?(?:c[âa]mera|camera|webcam)\b/i;
+export const CAMERA_FECHAR_WORDS =
+  /^(?:esconde|esconda|esconder|fecha|feche|fechar|desliga|desligue|desligar|desativa|desative|desativar|sai\s+da|saia\s+da)\s+(?:(?:a|o)\s+)?(?:c[âa]mera|camera|webcam)\b/i;
+export const INTERFACE_MODE_WORDS =
+  /^(?:modo\s+interface|entra\s+no\s+modo\s+interface|entrar\s+no\s+modo\s+interface|ativa\s+o\s+modo\s+interface|ative\s+o\s+modo\s+interface|ligar\s+o\s+modo\s+interface|modo\s+gestos|modo\s+m[ãa]os|m[ãa]os\s+controlam\s+a\s+interface)\b/i;
+export const INTERFACE_EXIT_WORDS =
+  /^(?:sai\s+do\s+modo\s+interface|sair\s+do\s+modo\s+interface|desativa\s+o\s+modo\s+interface|desative\s+o\s+modo\s+interface|desligar\s+o\s+modo\s+interface|sai\s+do\s+modo\s+gestos|modo\s+normal)\b/i;
+export const SAUDE_STATUS_WORDS =
+  /^(?:sa[úu]de|meus\s+batimentos|meu\s+batimento|batimentos|batimento|batimento\s+card[ií]aco|como\s+est[ãa]o\s+meus\s+batimentos|qual\s+(?:é\s+)?(?:o\s+)?meu\s+batimento)\b/i;
+
+// ——— Comandos de voz de FINANÇAS, IDENTIDADE e rede P2P ———
+// (exportados para os testes de roteamento)
+export const FINANCE_ADD_WORDS =
+  /^(?:adiciona|adicionar|registra|registre|registrar|lan[çc]a|lance|lan[çc]ar|coloca|coloque|anota|anote|marca|marque)\s+(?:(?:uma|um|a|o)\s+)?(?:despesa|receita|gasto|ganho)\b|^(?:gastei|paguei|comprei|ganhei|recebi|gasto|gastamos|recebemos|custou|entrou|caiu)\b/i;
+export const FINANCE_SUMMARY_WORDS =
+  /^(?:quanto\s+(?:eu\s+)?(?:tenho|gastei|gastamos|gastou|sobrou|sobra)|meu\s+saldo|qual\s+(?:é\s+)?(?:o\s+)?meu\s+saldo|resumo\s+financeiro|extrato|saldo|pra\s+onde\s+(?:vai|est[ãa])\s+meu\s+dinheiro|minhas\s+finan[çc]as|quanto\s+eu\s+tenho)\b/i;
+export const FINANCE_REMOVE_WORDS =
+  /^(?:remove|remova|remover|apaga|apague|apagar|cancela|cancele|cancelar)\s+(?:(?:a|o|essa|esse|esta|este)\s+)?(?:despesa|receita|gasto|lan[çc]amento|transa[çc][ãa]o|registro)\b/i;
+export const IDENTIDADE_WORDS =
+  /^(?:minha\s+identidade|qual\s+(?:é\s+)?(?:o\s+)?meu\s+id|meu\s+id|mostra\s+meu\s+id|mostre\s+meu\s+id|como\s+me\s+identifico)\b/i;
+export const PEER_ABRIR_WORDS =
+  /^(?:abre|abrir|abra|mostra|mostre|mostrar|exibe|exiba|liga|ligue|ativa|ative)\s+(?:(?:a|o|a\s+janela|o\s+painel|a\s+janela\s+de|o\s+painel\s+de)\s+)?(?:conex[ãa]o|rede\s+p2p|p2p|comunica[çc][ãa]o)\b|^(?:conectar|conecta|conecte)\s+com\s+outra\s+ia\b/i;
+export const ALERTA_ANTES_WORDS =
+  /^(?:me\s+)?(?:avisa|avise|avisar|alerta|alerte|lembra|lembre|lembrar)\s+(?:me\s+)?(\d+)\s+minutos?\s+antes\b/i;
+export const FINANCE_ABRIR_WORDS =
+  /^(?:abre|abrir|abra|mostra|mostre|mostrar|exibe|exiba|liga|ligue|ativa|ative|abre\s+a)\s+(?:(?:a|o)\s+)?(?:planilha\s+(?:de\s+)?|controle\s+(?:de\s+)?|minhas\s+|as\s+)?finan[çc]as\b|^(?:abre|abrir|abra|mostra|mostre|mostrar)\s+(?:a\s+)?planilha\s+financeira\b|^planilha\b/i;
+export const CHAT_ABRIR_WORDS =
+  /^(?:abre|abrir|abra|mostra|mostre|mostrar|exibe|exiba|liga|ligue|ativa|ative|entra|entrar)\s+(?:no\s+chat|no|o|a|as|na)\s*(?:chat|conversas?|mensagens|bate-?papo)\b|^(?:abre|abrir|abra|mostra|mostre|mostrar|exibe|exiba|liga|ligue|ativa|ative)\s+(?:o\s+)?chat\b|^chat\b/i;
+
+/** Extrai o valor em reais de uma frase ("R$ 50,90", "50 reais", "1.200"). */
+function extrairValorFinanceiro(texto: string): number | null {
+  const m = texto.match(/r\$\s*([\d][\d.,]*)|([\d][\d.,]*)\s*reais?/i);
+  if (!m) return null;
+  const raw = (m[1] ?? m[2] ?? "").replace(/\s/g, "");
+  let v: number;
+  if (raw.includes(",") && raw.includes(".")) v = Number(raw.replace(/\./g, "").replace(",", "."));
+  else if (raw.includes(",")) v = Number(raw.replace(",", "."));
+  else v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/** Descobre a categoria do gasto pela palavra-chave na frase. */
+function extrairCategoriaFinanceira(texto: string): string {
+  const regras: [RegExp, string][] = [
+    [/alimenta|caf[ée]|lanche|mercado|restaurante|pizza|ifood|padaria|feira|comida/i, "alimentação"],
+    [/transpor|combust|gasolina|uber|99|ônibus|onibus|metr[ôo]|t[áa]xi|ped[áa]gio/i, "transporte"],
+    [/moradia|aluguel|luz|[áa]gua|internet|condom[ií]nio|telefone/i, "moradia"],
+    [/lazer|cinema|show|viagem|jogo|streaming|netflix|spotify|jogos/i, "lazer"],
+    [/sa[úu]de|farm[áa]cia|m[ée]dico|dentista|rem[ée]dio|academia/i, "saúde"],
+    [/educa[çc][ãa]o|curso|faculdade|escola|livro/i, "educação"],
+    [/sal[áa]rio|bolsa|pens[ãa]o|freela|renda/i, "salário"],
+  ];
+  for (const [re, cat] of regras) if (re.test(texto)) return cat;
+  return "outros";
+}
+
+/** Descobre se é receita (dinheiro entrou) ou despesa (saiu). */
+function extrairTipoFinanceiro(texto: string): "receita" | "despesa" {
+  if (/ganhei|recebi|recebemos|receita|recebido|sal[áa]rio|renda|caiu\s+na\s+conta|entrou/i.test(texto)) {
+    return "receita";
+  }
+  return "despesa";
+}
+
+/** Monta uma descrição curta do lançamento a partir do resto da frase. */
+function descricaoFinanceira(texto: string): string | undefined {
+  const d = texto
+    .replace(
+      /^(?:adiciona|adicionar|registra|registre|registrar|lan[çc]a|lance|lan[çc]ar|coloca|coloque|anota|anote|marca|marque|gastei|paguei|comprei|ganhei|recebi|gasto|gastamos|recebemos|custou|entrou|caiu)\s+(?:(?:uma|um|a|o)\s+)?(?:despesa|receita|gasto|ganho|de|em|com|por)\s*/i,
+      "",
+    )
+    .replace(/\b\d[\d.,]*\s*reais?\b/gi, " ")
+    .replace(/\br\$\s*[\d.,]+\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+  return d || undefined;
+}
+
+// Comandos de voz do player de áudio do HUD (música do YouTube — só áudio)
+// (exportados para os testes de roteamento)
+export const MUSIC_OPEN_WORDS =
+  /^(?:abre|abrir|abra|mostra|mostre|mostrar|exibe|exiba|liga|ligue|ativa|ative|entra\s+no|entra\s+em)\s+(?:o\s+|um\s+)?player(?:\s+de\s+(?:m[úu]sica|m[úu]sicas|[áa]udio))?\b\.?$/i;
+export const MUSIC_CLOSE_WORDS =
+  /^(?:fecha|feche|fechar|esconde|esconda|oculta|oculte|sai\s+do|saia\s+do|sai\s+da|saia\s+da)\s+(?:(?:o|a|os|as)\s+)?(?:player\s+de\s+)?(?:m[úu]sica|musica|m[úu]sicas|musicas|player\s+de\s+[áa]udio)\b/i;
+export const MUSIC_PAUSE_WORDS =
+  /^(?:pausa|pause|pausar|para\s+a\s+m[úu]sica|pare\s+a\s+m[úu]sica|pausa\s+a\s+m[úu]sica)\b/i;
+export const MUSIC_PLAY_WORDS =
+  /^(?:continua|continue)\s+(?:a\s+)?(?:m[úu]sica|tocando|tocar)\b|^(?:volta|volte)\s+a\s+tocar\b|^(?:toca|toque)\s+de\s+novo\b|^(?:despausa|despause|retoma\s+a\s+m[úu]sica|retome\s+a\s+m[úu]sica)\b/i;
+export const MUSIC_NEXT_WORDS =
+  /^(?:pr[óo]xima\s+m[úu]sica|pr[óo]xima\s+faixa|pula\s+(?:a\s+)?m[úu]sica|pule\s+(?:a\s+)?m[úu]sica|avan[çc]a\s+(?:a\s+)?m[úu]sica|passa\s+para\s+a\s+pr[óo]xima|pula\s+essa|pule\s+essa)\b/i;
+export const MUSIC_PREV_WORDS =
+  /^(?:m[úu]sica\s+anterior|faixa\s+anterior|volta\s+(?:para\s+)?a\s+m[úu]sica\s+anterior|volte\s+(?:para\s+)?a\s+m[úu]sica\s+anterior|volta\s+uma\s+faixa|volte\s+uma\s+faixa)\b/i;
+export const MUSIC_VOLUME_UP_WORDS =
+  /^(?:aumenta|aumente|aumentar|sobe|suba|aumenta\s+o\s+som|sobe\s+o\s+som)\s*(?:o\s+)?(?:volume|som)\b/i;
+export const MUSIC_VOLUME_DOWN_WORDS =
+  /^(?:abaixa|abaixe|abaixar|diminui|diminua|reduz|reduza|baixa|baixe)\s*(?:o\s+)?(?:volume|som)\b/i;
+
+/**
+ * Extrai a consulta musical de "toca músicas do X" / "quero ouvir X" …
+ * Devolve null quando a intenção é VÍDEO (deixa o fluxo do YouTube seguir).
+ */
+export function parseMusicQuery(text: string): string | null {
+  const t = text;
+  // Guarda: intenção de vídeo ou do YouTube externo → NÃO é o player do HUD
+  if (/\b(?:no\s+youtube|no\s+site\s+do\s+youtube)\b|\b(?:v[ií]deo|v[ií]deos|clipe|clipes)\b/i.test(t)) return null;
+  let m: RegExpMatchArray | null =
+    // "toca músicas do X" · "tocar as músicas de X" · "toca um pouco de X"
+    t.match(
+      /^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e|liga|ligue|ative|ativa)\s+(?:(?:as|umas|algumas|um\s+pouco\s+de|um\s+pouco\s+da|um\s+pouco\s+do)\s+)?(?:m[úu]sicas|musicas)\s+(?:do|da|de|sobre|com)\s+(.+)$/i,
+    ) ??
+    // "toca playlist de X" · "toca uma playlist de X"
+    t.match(
+      /^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e|liga|ligue)\s+(?:uma\s+)?playlist\s+(?:do|da|de|sobre|com)\s+(.+)$/i,
+    ) ??
+    // "toca o álbum X de Y" · "toca álbum de X"
+    t.match(
+      /^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e|liga|ligue)\s+(?:o\s+|um\s+)?(?:[áa]lbum|album)\s+(?:(?:de|do|da|completo\s+de|completo\s+do|completo\s+da)\s+)?(.+)$/i,
+    ) ??
+    // "toca música do X" (coletivo, sem artigo) · "toca música de X"
+    t.match(
+      /^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e)\s+m[úu]sica\s+(?:do|da|de|sobre|com)\s+(.+)$/i,
+    ) ??
+    // "tocar um pouco de jazz" / "toca um pouco de X" (sem a palavra música)
+    t.match(/^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e)\s+um\s+pouco\s+(?:de|da|do)\s+(.+)$/i) ??
+    // "quero ouvir X" · "queria ouvir X" · "quero escutar X"
+    t.match(/^(?:quero|queria|gostaria\s+de)\s+(?:ouvir|escutar)\s+(.+)$/i);
+  // Música ambiente/fundo → busca padrão de foco
+  if (/^(?:toca|toque|tocar|coloque|coloca|colocar|ponha|p[õo]e)\s+m[úu]sica\s+(?:de\s+fundo|ambiente|de\s+relaxamento|pra\s+relaxar)$/i.test(t)) {
+    return "música relaxante para foco";
+  }
+  if (!m) return null;
+  const q = (m[1] ?? "").trim().replace(/[.,;!?]+$/, "");
+  return q.length > 0 && q.length <= 120 ? q : null;
+}
+
+// ——— Helpers de timer ———
+/** Soma durações compostas ("1 hora e 30 minutos" → 90 min). Retorna null se nada bater. */
+function parseDuration(raw: string): number | null {
+  const parts = raw.matchAll(
+    /(\d+(?:[.,]\d+)?)\s*(segundos?|seg|s|minutos?|min|horas?|h)\b/gi,
+  );
+  let total = 0;
+  let found = false;
+  for (const m of parts) {
+    const v = parseFloat(m[1].replace(",", "."));
+    if (!Number.isFinite(v) || v <= 0) continue;
+    const unit = (m[2] ?? "").toLowerCase();
+    if (unit.startsWith("h")) total += v * 3600_000;
+    else if (unit.startsWith("min")) total += v * 60_000;
+    else total += v * 1000;
+    found = true;
+  }
+  return found ? total : null;
+}
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (h) parts.push(`${h} hora${h > 1 ? "s" : ""}`);
+  if (m) parts.push(`${m} minuto${m > 1 ? "s" : ""}`);
+  if (s && !h) parts.push(`${s} segundo${s > 1 ? "s" : ""}`);
+  return parts.join(" e ") || `${totalSec} segundos`;
+}
+
+/** Reconhece "timer de X", "lembrete em X para Y", "me lembre de Y em X". */
+function parseTimerCommand(
+  text: string,
+): { ms: number; label: string; kind: "timer" | "reminder" } | null {
+  const t = text.trim();
+  const timerM = t.match(
+    /^(?:cria|create|marca|marque|dispara|dispare|inicia|inicie|vou querer|quero)?\s*(?:um\s+)?timer\s+de\s+(.+)$/i,
+  );
+  if (timerM) {
+    const ms = parseDuration(timerM[1]);
+    if (ms) return { ms, label: "timer", kind: "timer" };
+  }
+  const rem1 = t.match(/^(?:lembrete|alarme)\s+(?:em|daqui a)\s+(.+?)\s+(?:para|pra)\s+(.+)$/i);
+  if (rem1) {
+    const ms = parseDuration(rem1[1]);
+    const label = rem1[2].trim();
+    if (ms && label) return { ms, label, kind: "reminder" };
+  }
+  const rem2 = t.match(/^(?:me\s+lembre|me\s+lembra|me\s+avise)\s+de\s+(.+?)\s+(?:em|daqui a)\s+(.+)$/i);
+  if (rem2) {
+    const ms = parseDuration(rem2[2]);
+    const label = rem2[1].trim();
+    if (ms && label) return { ms, label, kind: "reminder" };
+  }
+  const rem3 = t.match(/^(?:em|daqui a)\s+(.+?)\s+(?:me\s+lembre|me\s+lembra|me\s+avise)\s+de\s+(.+)$/i);
+  if (rem3) {
+    const ms = parseDuration(rem3[1]);
+    const label = rem3[2].trim();
+    if (ms && label) return { ms, label, kind: "reminder" };
+  }
+  return null;
+}
+
+// ——— Helpers de clipboard (client-side) ———
+async function copyToClipboard(text: string): Promise<string> {
+  if (!text) return "O que devo copiar?";
+  try {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      return "Não consigo acessar a área de transferência neste navegador.";
+    }
+    await navigator.clipboard.writeText(text);
+    return `Copiei para a área de transferência: ${text.slice(0, 80)}.`;
+  } catch {
+    return "Não consegui copiar. Talvez o navegador tenha bloqueado o acesso à área de transferência.";
+  }
+}
+
+async function readClipboard(): Promise<string> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      return "Não consigo acessar a área de transferência neste navegador.";
+    }
+    const text = await navigator.clipboard.readText();
+    if (!text) return "A área de transferência está vazia.";
+    return `Na área de transferência está: ${text.slice(0, 200)}.`;
+  } catch {
+    return "Não consegui ler a área de transferência.";
+  }
+}
+
+export function createAssistant(callbacks: AssistantCallbacks): Assistant {
+  // Contador de chamadas em voo: só notifica “livre” quando todas terminam,
+  // evitando que uma pergunta cancelada pela resposta zere o busy no meio do fluxo.
+  let inFlight = 0;
+  let pendingToken: string | null = null;
+  let muted = false;
+  const timers: TimerInfo[] = [];
+
+  // Barge-in: momento em que o usuário começou a falar. Usado para processar a
+  // frase mesmo que a fala anterior ainda esteja terminando de ser cancelada.
+  let lastBargeAt = 0;
+
+  // Fala somente se o usuário não mandou “sem som”.
+  const say = async (reply: string) => {
+    if (!muted) await speak(reply);
+  };
+
+  // Sincroniza o token pendente com o HUD (indicador “AGUARDANDO CONFIRMAÇÃO”)
+  const setPending = (token: string | null) => {
+    pendingToken = token;
+    callbacks.onConfirming(token !== null);
+  };
+
+  const begin = () => {
+    inFlight += 1;
+    callbacks.onBusy(true);
+  };
+  const end = () => {
+    inFlight = Math.max(0, inFlight - 1);
+    if (inFlight === 0) callbacks.onBusy(false);
+  };
+
+  const handleText = async (text: string) => {
+    // Limpa a fala antes de tudo: cortesia, gagueira e pontuação ficam de
+    // fora da intenção (nunca entram em agenda, memória ou no modelo).
+    const trimmed = normalizeUtterance(text).trim();
+
+    // Comando de mudo: funciona no meio de uma fala (corta na hora) e silencia depois
+    if (MUTE_WORDS.test(trimmed)) {
+      muted = true;
+      begin();
+      try {
+        setSpeechBlocked(true);
+        callbacks.onTranscript(trimmed);
+        callbacks.onReply("SOM DESLIGADO");
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (UNMUTE_WORDS.test(trimmed)) {
+      muted = false;
+      begin();
+      try {
+        setSpeechBlocked(false);
+        callbacks.onTranscript(trimmed);
+        const reply = "Tá bom, vou falar de novo.";
+        callbacks.onReply(reply);
+        await speak(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // Pedido para digitar URL/@ na interface: abre a caixa de texto sem processos o comando
+    if (TYPE_REQUEST_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Pode digitar a URL ou o @ do Instagram aqui na tela que eu acesso.";
+        callbacks.onReply(reply);
+        callbacks.onRequestInput?.();
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Nível de humor/sarcasmo do ARES por voz (0–100%) ———
+    if (HUMOR_PCT_WORDS.test(trimmed)) {
+      const m = trimmed.match(/(\d{1,3})/);
+      const alvo = Math.max(0, Math.min(100, parseInt(m?.[1] ?? "0", 10)));
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const nivel = setHumorLevel(alvo);
+        const reply = `Humor ajustado em ${nivel} por cento.`;
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(nivel);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (HUMOR_SERIO_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        setHumorLevel(0);
+        const reply = "Modo sério ativado. Sarcasmo em zero por cento.";
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(0);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (HUMOR_MAXIMO_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        setHumorLevel(100);
+        const reply = "Modo brincalhão ativado. Sarcasmo no máximo.";
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(100);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (HUMOR_MAIS_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const nivel = adjustHumorLevel(20);
+        const reply = `Sarcasmo aumentado para ${nivel} por cento.`;
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(nivel);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (HUMOR_MENOS_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const nivel = adjustHumorLevel(-20);
+        const reply = `Sarcasmo reduzido para ${nivel} por cento.`;
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(nivel);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (HUMOR_STATUS_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const nivel = getHumorLevel();
+        const reply = `Meu nível de humor está em ${nivel} por cento.`;
+        callbacks.onReply(reply);
+        callbacks.onHumorLevel?.(nivel);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    // ——— Janela WHATSAPP do HUD (sessão real do whatsapp-web.js) ———
+    if (WHATSAPP_OPEN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply =
+          "Abri o WhatsApp no painel. Se for a primeira vez, escaneie o QR code com o celular para conectar a sessão.";
+        callbacks.onReply(reply);
+        callbacks.onPanel?.("whatsapp", "abrir");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (WHATSAPP_CLOSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Fechei o WhatsApp.";
+        callbacks.onReply(reply);
+        callbacks.onPanel?.("whatsapp", "fechar");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Janela CALENDÁRIO do HUD (agenda sincronizada com a memória) ———
+    if (CALENDAR_OPEN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri o calendário no painel. Ele está sincronizado com a sua memória — marca novos compromissos por voz ou no próprio calendário.";
+        callbacks.onReply(reply);
+        callbacks.onPanel?.("calendario", "abrir");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (CALENDAR_CLOSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Fechei o calendário.";
+        callbacks.onReply(reply);
+        callbacks.onPanel?.("calendario", "fechar");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Câmera do HUD (hand tracking + rPPG) e modo interface ———
+    if (CAMERA_ABRIR_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply =
+          "Ligando a câmera. Mostre uma mão para ela: a pinça entre polegar e indicador gira o orbe, e as duas mãos afastando ou aproximando dão zoom. No modo interface, as mãos controlam os painéis do HUD.";
+        callbacks.onReply(reply);
+        callbacks.onCamera?.("abrir");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (CAMERA_FECHAR_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Desliguei a câmera.";
+        callbacks.onReply(reply);
+        callbacks.onCamera?.("fechar");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (INTERFACE_MODE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply =
+          "Modo interface ativado. Com a mão em pinça, arraste os painéis do HUD; afaste ou aproxime as duas mãos para redimensionar o painel selecionado. Diga sai do modo interface para voltar.";
+        callbacks.onReply(reply);
+        callbacks.onInterfaceMode?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (INTERFACE_EXIT_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Saindo do modo interface. As mãos voltam a controlar o orbe.";
+        callbacks.onReply(reply);
+        callbacks.onInterfaceMode?.(false);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (SAUDE_STATUS_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Vou verificar seus batimentos pela câmera.";
+        callbacks.onReply(reply);
+        callbacks.onSaudeStatus?.();
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Janela de catálogo de comandos (mostrar comandos) ———
+    if (COMANDOS_OPEN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri a lista de comandos no painel. Diga o nome de um comando para saber como usá-lo.";
+        callbacks.onReply(reply);
+        callbacks.onComandos?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (COMANDOS_CLOSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Fechei a lista de comandos.";
+        callbacks.onReply(reply);
+        callbacks.onComandos?.(false);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Janela REGISTRO DE AÇÕES (tabela de falhas) ———
+    if (ERROS_OPEN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri o registro de ações no painel. Ele mostra as tarefas que não consegui executar e o motivo.";
+        callbacks.onReply(reply);
+        callbacks.onErros?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (ERROS_CLOSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Fechei o registro de ações.";
+        callbacks.onReply(reply);
+        callbacks.onErros?.(false);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Recolher/expandir o painel de comandos (collapse) ———
+    if (CONTROLS_COLLAPSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Recolhi o painel de comandos.";
+        callbacks.onReply(reply);
+        callbacks.onControlsCollapse?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (CONTROLS_EXPAND_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Expandi o painel de comandos.";
+        callbacks.onReply(reply);
+        callbacks.onControlsCollapse?.(false);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Player de áudio do HUD (música do YouTube — só o áudio) ———
+    if (MUSIC_OPEN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri o player de música. Diga o que você quer ouvir.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "abrir", query: "" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    const musicQuery = parseMusicQuery(trimmed);
+    if (musicQuery) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = `Vou buscar ${musicQuery} e tocar no player de música.`;
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "abrir", query: musicQuery });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_PAUSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Pausei a música.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "controle", acao: "pause" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_PLAY_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Voltei a tocar a música.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "controle", acao: "play" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_NEXT_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Pulando para a próxima música.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "controle", acao: "proxima" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_PREV_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Voltando para a música anterior.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "controle", acao: "anterior" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_VOLUME_UP_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        callbacks.onMusic?.({ tipo: "controle", acao: "volume", valor: 10 });
+        const reply = "Aumentei o volume.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_VOLUME_DOWN_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        callbacks.onMusic?.({ tipo: "controle", acao: "volume", valor: -10 });
+        const reply = "Diminui o volume.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (MUSIC_CLOSE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Fechei o player de música.";
+        callbacks.onReply(reply);
+        callbacks.onMusic?.({ tipo: "fechar" });
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Atalhos personalizados de sites (MEUS SITES da janela COMANDOS) ———
+    // Roda DEPOIS dos comandos nativos do HUD (editor/explorer/terminal/
+    // música/mapa) para não roubar frases como "abre o terminal"
+    // caso o usuário salve um atalho com o mesmo nome.
+    const customSite = matchCustomSite(trimmed);
+    if (customSite) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        let url = customSite.url;
+        if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+        const reply = `Abri o site ${customSite.nome} no navegador.`;
+        callbacks.onReply(reply);
+        callbacks.onOpenUrl?.(url);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Resumo de documento (resume o documento X) ———
+    const resumoM = trimmed.match(
+      /^(?:resume|resuma|resumir|faz\s+um\s+resumo\s+de|faça\s+um\s+resumo\s+de|me\s+resume|me\s+resuma|fala\s+um\s+resumo\s+de)\s+(?:o\s+|a\s+)?(?:documento|arquivo|texto)?\s*(.+)$/i,
+    );
+    if (resumoM) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const caminho = (resumoM[1] ?? "").trim().replace(/[.,;!?]+$/, "");
+        if (!caminho) {
+          const reply = "Qual documento você quer que eu resuma? (ex.: resume o documento C:/meus/arquivo.docx)";
+          callbacks.onReply(reply);
+          await say(reply);
+          return;
+        }
+        callbacks.onReply(`Vou resumir ${caminho}…`);
+        await say(`Vou resumir o documento ${caminho}. Um momento.`);
+        const res = await fetch(`/api/resumo?path=${encodeURIComponent(caminho)}`);
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          message?: string;
+          nome?: string;
+          resumo?: string;
+          stats?: { palavras?: number; linhas?: number };
+        } | null;
+        if (!res.ok || !data || !data.ok || !data.resumo) {
+          const reply = data?.message ?? "Não consegui resumir esse arquivo.";
+          callbacks.onReply(reply);
+          await say(reply);
+          return;
+        }
+        const reply = `Resumo de ${data.nome ?? caminho}: ${data.resumo}`;
+        callbacks.onReply(reply);
+        await say(reply.slice(0, 1100));
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Timer / lembrete (client-side, sem servidor) ———
+    const timerCmd = parseTimerCommand(trimmed);
+    if (timerCmd) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const t: TimerInfo = {
+          id: `t${Date.now()}`,
+          label: timerCmd.label,
+          kind: timerCmd.kind,
+          endsAt: Date.now() + timerCmd.ms,
+          totalMs: timerCmd.ms,
+        };
+        timers.push(t);
+        callbacks.onTimers?.(timers.map((x) => ({ ...x })));
+        window.setTimeout(() => fireTimer(t.id), timerCmd.ms);
+        const reply =
+          timerCmd.kind === "timer"
+            ? `Timer de ${formatDuration(timerCmd.ms)} iniciado.`
+            : `Lembrete marcado para ${formatDuration(timerCmd.ms)}: ${timerCmd.label}.`;
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Cancelar timers/lembretes ———
+    if (
+      /^(?:cancela|cancelar|para|pare|remove|remover|apaga|apagar)\s+(?:todos\s+os\s+)?(?:timers?|lembretes?|alarmes?)\b/i.test(
+        trimmed,
+      )
+    ) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const count = timers.length;
+        timers.length = 0;
+        callbacks.onTimers?.([]);
+        const reply = count
+          ? `Cancelei ${count} timer${count > 1 ? "s" : ""}.`
+          : "Não tenho nenhum timer ativo.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Clipboard: copiar (escrever) ———
+    const copyCmd = trimmed.match(
+      /^(?:copia|copie|copiar|guarda no clipboard|salva no clipboard|cola isso)\s+(.+)$/i,
+    );
+    if (copyCmd) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const text = (copyCmd[1] ?? "").trim().replace(/[.,;!?]+$/, "");
+        const reply = await copyToClipboard(text);
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Clipboard: colar (ler) ———
+    if (
+      /^(?:cola|cole|colar|o que (?:esta|está|tem) (?:na area de transferencia|na área de transferência|no clipboard)|me (?:diz|diga) o que (?:copiei|copiou)|o que copiei)\b/i.test(
+        trimmed,
+      )
+    ) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = await readClipboard();
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Controle financeiro (voz local + /api/finance) ———
+    if (FINANCE_ADD_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const valor = extrairValorFinanceiro(trimmed);
+        if (!valor) {
+          const reply =
+            "Não entendi o valor. Diga por exemplo: adiciona despesa de 50 reais em alimentação.";
+          callbacks.onReply(reply);
+          await say(reply);
+          return;
+        }
+        const tipo = extrairTipoFinanceiro(trimmed);
+        const categoria = extrairCategoriaFinanceira(trimmed);
+        const res = await fetch("/api/finance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            acao: "add",
+            tipo,
+            valor,
+            categoria,
+            descricao: descricaoFinanceira(trimmed),
+          }),
+        });
+        const data = (await res.json().catch(() => null)) as { message?: string } | null;
+        const reply = data?.message ?? "Registrei o lançamento financeiro.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (FINANCE_SUMMARY_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const res = await fetch("/api/finance");
+        const data = (await res.json().catch(() => null)) as { falado?: string } | null;
+        const reply =
+          data?.falado ??
+          "Ainda não tenho lançamentos registrados. Diga por exemplo: adiciona despesa de 50 reais em alimentação.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (FINANCE_REMOVE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const ref = trimmed.match(/#\d+/)?.[0] ?? trimmed;
+        const res = await fetch("/api/finance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ acao: "remove", ref }),
+        });
+        const data = (await res.json().catch(() => null)) as { message?: string } | null;
+        const reply = data?.message ?? "Removi o lançamento.";
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Identidade e rede P2P (outras IAs) ———
+    if (IDENTIDADE_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const id = estadoIdentidade();
+        const idPublico = id.idPublico || "ainda não criada";
+        const reply = `Minha identidade é ${idPublico}. Abri o painel de identidade para você ver o fingerprint e a senha.`;
+        callbacks.onReply(reply);
+        callbacks.onIdentidade?.();
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (PEER_ABRIR_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply =
+          "Abri o chat. Gere um convite e envie para a outra IA, ou cole o convite que ela te enviou — a identidade é verificada criptograficamente.";
+        callbacks.onReply(reply);
+        callbacks.onPeer?.("abrir");
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (FINANCE_ABRIR_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri a planilha de finanças.";
+        callbacks.onReply(reply);
+        callbacks.onFinance?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+    if (CHAT_ABRIR_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const reply = "Abri o chat.";
+        callbacks.onReply(reply);
+        callbacks.onChat?.(true);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // ——— Antecedência dos alertas de agenda ———
+    if (ALERTA_ANTES_WORDS.test(trimmed)) {
+      begin();
+      try {
+        callbacks.onTranscript(trimmed);
+        const mins = Number(trimmed.match(ALERTA_ANTES_WORDS)?.[1] ?? "5");
+        try {
+          window.localStorage.setItem("ares-alerta-antes", String(Math.min(60, Math.max(1, mins))));
+        } catch {
+          /* sem storage */
+        }
+        const reply = `Ok, vou avisar ${mins} minutos antes de cada compromisso.`;
+        callbacks.onReply(reply);
+        await say(reply);
+      } finally {
+        end();
+      }
+      return;
+    }
+
+    // Deixa o usuário responder “sim”/“não” mesmo enquanto a pergunta ainda está sendo falada
+    const answeringPending =
+      pendingToken !== null &&
+      (CONFIRM_WORDS.test(trimmed) || CANCEL_WORDS.test(trimmed));
+    // Barge-in: se o usuário acabou de começar a falar, processa a frase mesmo
+    // que a fala/processamento anterior ainda esteja sendo cancelado.
+    const barging = Date.now() - lastBargeAt < 2000;
+    if (inFlight > 0 && !answeringPending && !barging) return;
+    callbacks.onTranscript(trimmed);
+    // Fala de fundo/solta ("ok", "ah", "hum"…) não aciona o núcleo nem gera
+    // resposta — a menos que seja o sim/não de uma confirmação pendente.
+    if (!answeringPending && isNoiseUtterance(text)) return;
+    // "Obrigado"/"valeu" soltos: resposta curta local, sem chamar o LLM nem
+    // criar agenda/memória/tarefa com essas palavras.
+    if (!pendingToken && isGratitude(text)) {
+      const reply = "De nada! Sempre que precisar, é só chamar.";
+      callbacks.onReply(reply);
+      await say(reply);
+      return;
+    }
+    begin();
+    try {
+      // Fluxo de confirmação: “sim” confirma o apagamento pendente; “não” cancela
+      if (pendingToken && CANCEL_WORDS.test(trimmed)) {
+        const reply = "Ok, cancelei a ação. Nada foi apagado.";
+        setPending(null);
+        callbacks.onReply(reply);
+        await say(reply);
+        return;
+      }
+      if (pendingToken && CONFIRM_WORDS.test(trimmed)) {
+        const token = pendingToken;
+        setPending(null);
+        const res = await fetch("/api/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+        });
+        const data = (await res.json().catch(() => null)) as AgentResult | null;
+        if (!res.ok || !data) {
+          const reply = "Não consegui confirmar a ação. Tente novamente.";
+          callbacks.onReply(reply);
+          await say(reply);
+          return;
+        }
+        callbacks.onReply(data.reply);
+        if (data.logs) data.logs.forEach((l) => callbacks.onLog(l));
+        else if (data.log) callbacks.onLog(data.log);
+        await say(data.reply);
+        return;
+      }
+
+      setPending(null);
+      // Análise de sentimento: o ARES adapta o tom ao humor do usuário e
+      // antecipa necessidades (média móvel — um texto sozinho não define tudo).
+      const sent = analyzeSentiment(trimmed);
+      const humorAtual = updateHumor(trimmed);
+      callbacks.onHumor?.(humorAtual, humorLabel(humorAtual));
+      const humorCtx = sentimentContext(trimmed);
+      const res = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: trimmed, humor: humorCtx }),
+      });
+      if (!res.ok) {
+        const reply = "Ocorreu um erro no meu núcleo. Tente novamente.";
+        callbacks.onReply(reply);
+        await say(reply);
+        return;
+      }
+      const data = (await res.json()) as AgentResult;
+      // Antecipação: se o usuário está tenso/triste, reforça a sugestão de apoio
+      const sugestoes = data.sugestoes ?? [];
+      if (sugestoes.length === 0 && (getHumor() === "tenso" || getHumor() === "triste") && sent.score <= -0.2) {
+        callbacks.onSuggestions?.(["Quer que eu te ajude a resolver isso?"]);
+      } else {
+        callbacks.onSuggestions?.(sugestoes);
+      }
+      if (data.needsConfirmation) {
+        setPending(data.needsConfirmation.token);
+        callbacks.onReply(data.reply);
+        await say(data.reply);
+      } else {
+        callbacks.onReply(data.reply);
+        if (data.logs) data.logs.forEach((l) => callbacks.onLog(l));
+        else if (data.log) callbacks.onLog(data.log);
+        await say(data.reply);
+      }
+    } finally {
+      end();
+    }
+  };
+
+  /** Dispara um timer vencido: remove da lista, avisa a UI e fala. */
+  const fireTimer = (id: string) => {
+    const idx = timers.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    const t = timers[idx];
+    timers.splice(idx, 1);
+    callbacks.onTimers?.(timers.map((x) => ({ ...x })));
+    const msg =
+      t.kind === "reminder"
+        ? `Lembrete: ${t.label}.`
+        : `O timer de ${formatDuration(t.totalMs)} terminou.`;
+    callbacks.onTimerFired?.(t);
+    void (async () => {
+      if (!muted) await speak(msg);
+    })();
+  };
+
+  const voice: VoiceListener = createVoiceListener({
+    onListening: callbacks.onListening,
+    onError: callbacks.onError,
+    onInterim: (text) => callbacks.onTranscript(text),
+    onSpeechStart: () => {
+      // Só abre a janela de barge se havia fala de verdade sendo cortada
+      // (senão um comando novo durante o “pensando” não vira processamento concorrente)
+      if (cancelSpeech()) lastBargeAt = Date.now();
+    },
+    onFinal: (text) => {
+      if (text.trim()) void handleText(text.trim());
+    },
+  });
+
+  return {
+    start() {
+      voice.start();
+    },
+    stop() {
+      voice.stop();
+    },
+    isListening: () => voice.isListening(),
+    send(text) {
+      // Digitar um comando enquanto o ARES fala também interrompe a fala
+      if (cancelSpeech()) lastBargeAt = Date.now();
+      if (text.trim()) void handleText(text.trim());
+    },
+    speak(text) {
+      void say(text);
+    },
+    getTimers: () => timers.map((x) => ({ ...x })),
+  };
+}
