@@ -1,0 +1,133 @@
+import { NextRequest, NextResponse } from "next/server";
+import fs from "fs";
+import fsp from "fs/promises";
+import { spawn, spawnSync } from "child_process";
+import { Readable } from "stream";
+import { resolveProjectPath } from "@/lib/agent/project";
+import { mimeOf } from "@/lib/media";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Mídia local do HUD (imagens e vídeos do explorer/editor).
+ * GET ?path=...            → stream do arquivo com suporte a Range (o <video>
+ *                            usa Range para buscar/arrastar a barra).
+ * GET ?action=probe&path=  → { ok, nome, tamanho, mime, ffmpeg } — o player
+ *                            decide o fallback de codec.
+ * GET ?transcode=1&path=   → converte/remuxa para mp4 via ffmpeg (se instalado)
+ *                            e transmite na hora (mkv/avi/wmv → player do HUD).
+ * GET ?transcode=2&path=   → re-encode completo (libx264/aac) quando o remux
+ *                            `-c copy` não é compatível.
+ */
+
+let ffmpegCache: boolean | null = null;
+function hasFfmpeg(): boolean {
+  if (ffmpegCache !== null) return ffmpegCache;
+  try {
+    const r = spawnSync("ffmpeg", ["-version"], { timeout: 8000, stdio: "ignore" });
+    ffmpegCache = !r.error && r.status === 0;
+  } catch {
+    ffmpegCache = false;
+  }
+  return ffmpegCache;
+}
+
+async function resolveMedia(raw: string): Promise<string | null> {
+  const p = resolveProjectPath((raw ?? "").trim());
+  try {
+    const st = await fsp.stat(p);
+    return st.isFile() ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function GET(req: NextRequest) {
+  const sp = req.nextUrl.searchParams;
+  const raw = sp.get("path") ?? "";
+  const p = await resolveMedia(raw);
+  if (!p) {
+    return NextResponse.json({ ok: false, message: "Arquivo não encontrado." }, { status: 404 });
+  }
+  const st = await fsp.stat(p);
+  const mime = mimeOf(p);
+
+  if (sp.get("action") === "probe") {
+    return NextResponse.json({
+      ok: true,
+      nome: p.split(/[\\/]/).pop(),
+      tamanho: st.size,
+      mime,
+      ffmpeg: hasFfmpeg(),
+    });
+  }
+
+  const transcode = sp.get("transcode") ?? "";
+  if (transcode === "1" || transcode === "2") {
+    if (!hasFfmpeg()) {
+      return NextResponse.json(
+        { ok: false, message: "ffmpeg não está instalado para converter este codec." },
+        { status: 501 },
+      );
+    }
+    // 1 = remux rápido (-c copy, mkv h264/aac → mp4 sem re-encodar);
+    // 2 = re-encode completo (libx264/aac) quando o container/codec exige.
+    const base = ["-loglevel", "error", "-i", p, "-map", "0:v:0", "-map", "0:a:0?"];
+    const codecs =
+      transcode === "1"
+        ? ["-c", "copy"]
+        : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac"];
+    const proc = spawn(
+      "ffmpeg",
+      [...base, ...codecs, "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    // Nunca deixe um processo órfão: falha de spawn ou cancelamento do cliente
+    proc.on("error", () => proc.kill());
+    req.signal.addEventListener("abort", () => proc.kill(), { once: true });
+    const stream = Readable.toWeb(proc.stdout) as ReadableStream;
+    return new Response(stream, {
+      headers: { "Content-Type": "video/mp4", "Cache-Control": "no-store" },
+    });
+  }
+
+  // Stream normal (imagem ou vídeo) com suporte a Range para o player buscar
+  const range = req.headers.get("range");
+  const size = st.size;
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": mime,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "no-store",
+  };
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    let start: number;
+    let end: number;
+    if (m && m[1] === "" && m[2]) {
+      // Range sufixo: "bytes=-500" → os ÚLTIMOS 500 bytes
+      const suffix = parseInt(m[2], 10);
+      start = Math.max(0, size - (Number.isFinite(suffix) ? suffix : size));
+      end = size - 1;
+    } else {
+      start = m?.[1] ? parseInt(m[1], 10) : 0;
+      end = m?.[2] ? parseInt(m[2], 10) : size - 1;
+    }
+    if (!Number.isFinite(start) || start < 0) start = 0;
+    if (!Number.isFinite(end) || end >= size) end = size - 1;
+    if (start > end) {
+      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}` } });
+    }
+    const body = Readable.toWeb(fs.createReadStream(p, { start, end })) as ReadableStream;
+    return new Response(body, {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        "Content-Length": String(end - start + 1),
+        "Content-Range": `bytes ${start}-${end}/${size}`,
+      },
+    });
+  }
+  const body = Readable.toWeb(fs.createReadStream(p)) as ReadableStream;
+  return new Response(body, { headers: { ...baseHeaders, "Content-Length": String(size) } });
+}
