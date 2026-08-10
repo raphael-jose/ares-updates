@@ -1,0 +1,136 @@
+/**
+ * Publicador de atualizações — usado APENAS no servidor (rota /api/publish).
+ *
+ * Fluxo do botão PUBLICAR na interface (modo desenvolvedor):
+ *   1. Roda `npx tsx scripts/publicar-atualizacao.ts` (gera dist-atualizacao/)
+ *   2. Envia manifest.json + arquivos para o repositório GitHub via API
+ *      (Contents API — o mesmo layout do upload manual: raiz = manifest.json,
+ *      arquivos/ = arquivos com hash).
+ *
+ * Segurança: só ativa com ARES_DEV_MODE=1 no .env; o token (ARES_GITHUB_TOKEN)
+ * vive no .env, nunca no bundle do navegador.
+ */
+
+import { exec } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
+
+export interface EstadoPublicacao {
+  disponivel: boolean;
+  motivo?: string;
+  repo?: string;
+  versao?: string;
+}
+
+function versaoDoManifest(): string | undefined {
+  const p = join(process.cwd(), "dist-atualizacao", "manifest.json");
+  if (!existsSync(p)) return undefined;
+  try {
+    return (JSON.parse(readFileSync(p, "utf-8")) as { versao?: string }).versao;
+  } catch {
+    return undefined;
+  }
+}
+
+export function estadoPublicacao(): EstadoPublicacao {
+  if (process.env.ARES_DEV_MODE !== "1") {
+    return { disponivel: false, motivo: "Modo desenvolvedor desligado (ARES_DEV_MODE=1 no .env)." };
+  }
+  const token = process.env.ARES_GITHUB_TOKEN?.trim();
+  const repo = process.env.ARES_GITHUB_REPO?.trim();
+  if (!token) return { disponivel: false, motivo: "Falta ARES_GITHUB_TOKEN no .env (token com permissão de escrita no repositório)." };
+  if (!repo) return { disponivel: false, motivo: "Falta ARES_GITHUB_REPO no .env (ex.: raphael-jose/ares-updates)." };
+  return { disponivel: true, repo, versao: versaoDoManifest() };
+}
+
+/** Roda o script de publicação (gera dist-atualizacao/ com o que mudou). */
+export async function rodarScriptPublicacao(): Promise<{ ok: boolean; saida: string }> {
+  try {
+    const { stdout, stderr } = await execAsync("npx tsx scripts/publicar-atualizacao.ts", {
+      cwd: process.cwd(),
+      timeout: 120_000,
+      windowsHide: true,
+    });
+    return { ok: true, saida: (stdout || "") + (stderr || "") };
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    return { ok: false, saida: `${err.stdout ?? ""}\n${err.stderr ?? ""}\n${err.message ?? ""}` };
+  }
+}
+
+async function ghApi(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; json: unknown }> {
+  const token = process.env.ARES_GITHUB_TOKEN!.trim();
+  const r = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "arthemis-publicador",
+      "X-GitHub-Api-Version": "2022-11-28",
+      Accept: "application/vnd.github+json",
+      ...(init?.headers ?? {}),
+    },
+  });
+  const json = await r.json().catch(() => null);
+  return { ok: r.ok, status: r.status, json };
+}
+
+/**
+ * Envia dist-atualizacao/ para o repositório (manifest.json + arquivos/),
+ * via Contents API — preserva os arquivos antigos (como o upload manual).
+ */
+export async function empurrarParaGitHub(repo: string): Promise<{ ok: boolean; mensagem: string; enviados: number }> {
+  const raiz = join(process.cwd(), "dist-atualizacao");
+  const manifestPath = join(raiz, "manifest.json");
+  if (!existsSync(manifestPath)) {
+    return { ok: false, mensagem: "dist-atualizacao/manifest.json não existe — rode o script de publicação primeiro.", enviados: 0 };
+  }
+  let manifest: { versao: string; arquivos: Array<{ caminho: string; url: string }> };
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as typeof manifest;
+  } catch {
+    return { ok: false, mensagem: "manifest.json inválido.", enviados: 0 };
+  }
+  const arquivos = [
+    { caminho: "manifest.json", url: "manifest.json" },
+    ...manifest.arquivos.map((a) => ({ caminho: a.caminho, url: a.url })),
+  ];
+
+  let enviados = 0;
+  for (const f of arquivos) {
+    const caminhoLocal = join(raiz, f.url);
+    if (!existsSync(caminhoLocal)) {
+      return { ok: false, mensagem: `Arquivo ausente no pacote: ${f.url}`, enviados };
+    }
+    const conteudo = readFileSync(caminhoLocal).toString("base64");
+    // Se o arquivo já existe no repo, o PUT exige o sha atual
+    const existe = await ghApi(`/repos/${repo}/contents/${f.url}`);
+    const sha = existe.ok && existe.json && typeof existe.json === "object" && "sha" in existe.json
+      ? (existe.json as { sha: string }).sha
+      : undefined;
+    const r = await ghApi(`/repos/${repo}/contents/${f.url}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        message: `publicar atualização ${manifest.versao} (${f.caminho})`,
+        content: conteudo,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!r.ok) {
+      const det = r.json && typeof r.json === "object" && "message" in r.json
+        ? (r.json as { message: string }).message
+        : String(r.json);
+      return { ok: false, mensagem: `Falha ao enviar ${f.url} (HTTP ${r.status}): ${det.slice(0, 300)}`, enviados };
+    }
+    enviados++;
+  }
+  return {
+    ok: true,
+    mensagem: `Publicado no GitHub: versão ${manifest.versao} (${manifest.arquivos.length} arquivos alterados, ${enviados} envios).`,
+    enviados,
+  };
+}
+
+export { versaoDoManifest };
