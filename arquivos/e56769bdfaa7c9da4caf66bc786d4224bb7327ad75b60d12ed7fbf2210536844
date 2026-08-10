@@ -1,0 +1,79 @@
+export type ToolName =
+  | "create_folder"
+  | "create_file"
+  | "create_project"
+  | "read_file"
+  | "edit_file"
+  | "list_folder"
+  | "open_folder"
+  | "delete_path"
+  | "rename_path"
+  | "web_search"
+  | "show_image"
+  | "fetch_url"
+  | "open_url"
+  | "open_program"
+  | "send_whatsapp"
+  | "whatsapp_read"
+  | "open_instagram"
+  | "social_search"
+  | "weather"
+  | "currency"
+  | "crypto"
+  | "country"
+  | "joke"
+  | "remember"
+  | "forget"
+  | "add_task"
+  | "remove_task"
+  | "list_tasks"
+  | "add_agenda"
+  | "remove_agenda"
+  | "list_agenda"
+  | "add_transaction"
+  | "remove_transaction"
+  | "list_transactions"
+  | "finance_summary"
+  | "convert_units"
+  | "ver_novidades"
+  | "take_screenshot"
+  | "screen_read"
+  | "screen_click"
+  | "type_text"
+  | "screen_ask"
+  | "window_control"
+  | "list_windows";
+
+export interface ToolCall {
+  tool: ToolName;
+  args: Record<string, string>;
+}
+
+export interface LogEntry {
+  /** Identificador único estável (contador monotônico). */
+  id: number;
+  /** Timestamp local (HH:MM:SS). */
+  time: string;
+  /** Nome da ferramenta executada. */
+  tool: ToolName;
+  /** Texto curto descrevendo a ação (ex.: Pasta criada: C:/...). */
+  text: string;
+  /** Se a ação foi bem-sucedida. */
+  ok: boolean;
+}
+
+export interface AgentResult {
+  /** Texto que o ARES deve falar. */
+  reply: string;
+  /** Entrada de log da ação executada (quando houver). */
+  log?: LogEntry;
+  /** Logs de uma sequência (ex.: rotinas com vários passos). */
+  logs?: LogEntry[];
+  /** Quando apagar algo (delete_path), pede confirmação por voz antes de executar. */
+  needsConfirmation?: {
+    token: string;
+    action: string;
+  };
+  /** Sugestões curtas e relevantes ao assunto para o usuário continuar a conversa. */
+  sugestoes?: string[];
+}
