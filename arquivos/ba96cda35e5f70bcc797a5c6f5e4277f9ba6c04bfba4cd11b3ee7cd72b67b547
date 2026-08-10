@@ -1,0 +1,288 @@
+/**
+ * Análise de sentimento em português do Brasil para o ARES.
+ *
+ * Pega o texto falado/digitado pelo usuário e devolve:
+ * - um score contínuo (-1 muito negativo … +1 muito positivo)
+ * - um rótulo de humor (tenso / triste / neutro / animado / feliz)
+ * - palavras-chave que indicaram o sentimento
+ *
+ * É uma heurística léxica local (rápida e sem rede). O ARES usa o humor para
+ * adaptar o tom das respostas e para sugerir coisas relevantes antes de o
+ * usuário pedir.
+ */
+
+export type Humor =
+  | "tenso"
+  | "triste"
+  | "neutro"
+  | "animado"
+  | "feliz";
+
+export interface SentimentResult {
+  score: number; // -1 … +1
+  humor: Humor;
+  /** Palavras que mais pesaram (positivas/negativas encontradas). */
+  pistas: string[];
+}
+
+// ——— Léxico: palavras e expressões em português (normalizadas sem acento) ———
+// A ordem importa pouco; a pontuação é somada. Palavras curtas comuns foram
+// deixadas de fora para não dar falso positivo (ex.: "não" é tratada como negação).
+
+const POSITIVAS: Array<[RegExp, number]> = [
+  [/^(?:ador[oa]|adorei|am[oa]|amei|amo|curti|curto|gosto|gostei|gostaria)$/, 0.8],
+  [/^(?:ótimo|otimo|excelente|maravilhoso|perfeito|incr[ií]vel|sensacional|fant[aá]stico|espetacular|top|demais|show)$/, 0.9],
+  [/^(?:legal|bacana|massa|da hora|muito bom|muito boa|boa ideia|bom demais|firmeza)$/, 0.7],
+  [/^(?:obrigado|obrigada|valeu|vlw|agradec|thanks|thank you)$/, 0.6],
+  [/^(?:feliz|alegre|contente|animado|empolgado|euf[oó]rico|realizado|realizada|grato|grata|satisfeito|satisfeita)$/, 0.8],
+  [/^(?:consegui|conseguiu|funcionou|deu certo|resolveu|melhorou|avan[çc]ou|passou|aprovado|aprovada)$/, 0.7],
+  [/^(?:parab[eé]ns|sucesso|vit[óo]ria|venci|ganhei|ganhamos)$/, 0.9],
+  [/^(?:amo|adoro|amo demais|muito feliz|super feliz|bem demais|t[oó]p)$/, 0.9],
+  [/^(?:sim|pode|claro|com certeza|beleza|ok|okay|perfeito)$/, 0.4],
+  [/^(?:uau|nossa|nossa senhora|que legal|que massa|que bom|que maravilha)$/, 0.8],
+  [/^(?:f[áa]cil|tranquilo|tranquila|de boa|suave|relaxa|relaxado)$/, 0.5],
+];
+
+const NEGATIVAS: Array<[RegExp, number]> = [
+  [/^(?:odeio|odiei|detesto|detestei|pessimo|péssimo|horr[ií]vel|terr[ií]vel|pavoroso|ruim|pior|fracasso|bosta|merda)$/, 0.9],
+  [/^(?:triste|deprimido|deprimida|chateado|chateada|aborrecido|aborrecida|desanimado|desanimada|desmotivado|desmotivada)$/, 0.8],
+  [/^(?:estressado|estressada|estressante|nervoso|nervosa|irritado|irritada|puto|puta|bravo|brava|furioso|furiosa)$/, 0.8],
+  [/^(?:cansado|cansada|esgotado|esgotada|exausto|exausta|fadiga|sono|dormi mal)$/, 0.5],
+  [/^(?:erro|errou|falhou|falha|bug|bugado|quebrou|quebrado|n[ãa]o funciona|n[ãa]o funfa|quebrada)$/, 0.7],
+  [/^(?:perdi|perdeu|falhei|fracassei|n[ãa]o deu certo|n[ãa]o funcionou|n[ãa]o resolveu|piorou|piorou)$/, 0.8],
+  [/^(?:medo|com medo|preocupado|preocupada|ansioso|ansiosa|aflito|aflita|apreensivo|apreensiva)$/, 0.7],
+  [/^(?:dif[ií]cil|complicado|complicada|chato|chata|entediado|entediada|t[oó]rrido|torrível)$/, 0.6],
+  [/^(?:odeio|n[ãa]o aguento|n[ãa]o suporto|chega|basta|cansei|desisto|desisti|vou desistir)$/, 0.8],
+  [/^(?:pergunta|d[uú]vida|ajuda|socorro|problema|complica[çc][ãa]o)$/, 0.4],
+];
+
+// Intensificadores: amplificam o sentimento da próxima palavra ("muito bom", "super legal")
+const INTENSIFICADORES = /^(?:muito|super|extremamente|bastante|bem|pra caramba|demais|mega|hiper|ultra|t[ãa]o)$/i;
+// Negação: inverte o sentimento da palavra seguinte ("não gostei", "não achei bom")
+const NEGACOES = /^(?:n[ãa]o|nunca|jamais|nem)$/i;
+
+/** Normaliza para comparação: minúsculas, sem acentos, pontuação cortada. */
+function norm(w: string): string {
+  return w
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[.,;:!?()"']+$/, "");
+}
+
+/**
+ * Analisa o sentimento de um texto em português.
+ * Estratégia: divide em palavras, soma o léxico (com negação e
+ * intensificador de vizinhança), normaliza para [-1, 1] e mapeia para humor.
+ */
+export function analyzeSentiment(text: string): SentimentResult {
+  const raw = (text ?? "").trim();
+  if (!raw) return { score: 0, humor: "neutro", pistas: [] };
+
+  const words = raw.toLowerCase().split(/[\s,;!?.:()]+/).filter(Boolean);
+  let score = 0;
+  const pistas: string[] = [];
+  let hits = 0;
+
+  for (let i = 0; i < words.length; i++) {
+    const w = norm(words[i]);
+    if (!w) continue;
+
+    // Busca a palavra no léxico: POSITIVAS soma; NEGATIVAS subtrai (valores
+  // armazenados positivos, o sinal é aplicado aqui)
+    let val = 0;
+    let match = "";
+    for (const [re, v] of POSITIVAS) {
+      if (re.test(w)) {
+        val = v;
+        match = words[i];
+        break;
+      }
+    }
+    if (val === 0) {
+      for (const [re, v] of NEGATIVAS) {
+        if (re.test(w)) {
+          val = -v;
+          match = words[i];
+          break;
+        }
+      }
+    }
+    if (val === 0) continue;
+
+    // Negação antes da palavra ("não gostei") inverte o sinal
+    let negado = false;
+    if (i > 0 && NEGACOES.test(norm(words[i - 1]))) negado = true;
+    if (negado) val = -val;
+
+    // Intensificador antes ("muito bom") amplifica
+    let intenso = 1;
+    if (i > 0 && INTENSIFICADORES.test(norm(words[i - 1]))) intenso = 1.6;
+    else if (i > 1 && INTENSIFICADORES.test(norm(words[i - 2]))) intenso = 1.4;
+
+    score += val * intenso;
+    hits += 1;
+    if (pistas.length < 6 && !pistas.includes(match)) pistas.push(match);
+  }
+
+  if (hits === 0) return { score: 0, humor: "neutro", pistas: [] };
+
+  // Normaliza pela quantidade de palavras com sentimento (evita texto longo dominar)
+  const rawScore = score / Math.max(1, Math.min(hits, 4));
+  const clamped = Math.max(-1, Math.min(1, rawScore));
+
+  let humor: Humor = "neutro";
+  if (clamped <= -0.55) humor = "tenso";
+  else if (clamped <= -0.2) humor = "triste";
+  else if (clamped >= 0.55) humor = "feliz";
+  else if (clamped >= 0.2) humor = "animado";
+
+  return { score: Math.round(clamped * 100) / 100, humor, pistas };
+}
+
+/**
+ * Texto de tom para injetar no system prompt, baseado no humor do usuário.
+ * Deixa o ARES adaptar a resposta ao estado emocional de forma sutil.
+ */
+export function toneGuidance(humor: Humor): string {
+  switch (humor) {
+    case "tenso":
+      return "O usuário parece estressado. Seja calmo, direto e reconfortante; não use piadas nem rodeios. Valide a frustração e proponha um próximo passo simples.";
+    case "triste":
+      return "O usuário parece triste ou desanimado. Seja gentil, acolhedor e breve; mostre que entendeu, sem forçar alegria. Ofereça ajuda concreta.";
+    case "animado":
+      return "O usuário parece animado. Espelhe a energia de forma natural, seja ágil e proponha a próxima ação com entusiasmo.";
+    case "feliz":
+      return "O usuário parece feliz e satisfeito. Comemore junto com naturalidade, mantenha o tom leve e aproveite para sugerir um próximo passo.";
+    default:
+      return "Tom neutro, claro e natural.";
+  }
+}
+
+// ——— Nível de humor/sarcasmo do ARES ajustável por voz e por porcentagem ———
+// 0 = modo sério (sem sarcasmo) … 100 = máximo. Persistido no localStorage
+// (client-side); nos testes/SSR o cache em memória cobre.
+const HUMOR_LEVEL_KEY = "ares-humor-level";
+const HUMOR_LEVEL_DEFAULT = 50;
+let humorLevelCache: number | null = null;
+
+function clampPct(n: number): number {
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function persistHumorLevel(n: number): void {
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(HUMOR_LEVEL_KEY, String(n));
+    }
+  } catch {
+    /* storage indisponível (SSR/testes) — o cache em memória cobre */
+  }
+}
+
+/** Nível de humor/sarcasmo do ARES (0 = sério, 100 = máximo). */
+export function getHumorLevel(): number {
+  if (humorLevelCache !== null) return humorLevelCache;
+  let n = HUMOR_LEVEL_DEFAULT;
+  try {
+    if (typeof window !== "undefined") {
+      const raw = window.localStorage.getItem(HUMOR_LEVEL_KEY);
+      if (raw) n = clampPct(parseInt(raw, 10) || HUMOR_LEVEL_DEFAULT);
+    }
+  } catch {
+    /* storage indisponível */
+  }
+  humorLevelCache = n;
+  return n;
+}
+
+/** Define o nível (0–100), persiste e devolve o valor efetivo. */
+export function setHumorLevel(pct: number): number {
+  const n = clampPct(pct);
+  humorLevelCache = n;
+  persistHumorLevel(n);
+  return n;
+}
+
+/** Soma um delta (ex.: +20 / −20) e devolve o novo nível. */
+export function adjustHumorLevel(delta: number): number {
+  return setHumorLevel(getHumorLevel() + delta);
+}
+
+/** Volta ao padrão (50%). */
+export function resetHumorLevel(): number {
+  return setHumorLevel(HUMOR_LEVEL_DEFAULT);
+}
+
+/**
+ * Nível de humor/sarcasmo para o ARES conforme o humor do usuário E o nível
+ * ajustado (0–100%). O sarcasmo é leve e seco (tipo brincadeira entre amigos),
+ * nunca ofensivo. O estado emocional do usuário é soberano: estressado/triste
+ * desliga o humor mesmo com o nível no máximo.
+ */
+export function humorGuidance(humor: Humor, level = getHumorLevel()): string {
+  if (humor === "tenso") {
+    return "Humor: zero sarcasmo — o usuário está estressado. Nada de piadas nem ironia; só calma, clareza e apoio direto.";
+  }
+  if (humor === "triste") {
+    return "Humor: sem sarcasmo — o usuário está triste. No máximo uma observação acolhedora; jamais deboche ou ironia.";
+  }
+  const pct = clampPct(level);
+  if (pct <= 5) {
+    return "Humor: 0% — modo sério. Totalmente profissional: sem piadas, sem sarcasmo, respostas diretas e objetivas.";
+  }
+  if (pct < 40) {
+    return `Humor: ${pct}% — mínimo. Tom profissional; no máximo um comentário seco e raro, sem piadas e sem zombar do usuário.`;
+  }
+  if (pct < 70) {
+    return `Humor: ${pct}% — médio. Use sarcasmo seco e leve, comentários cômicos curtos e autodepreciação sutil de vez em quando. Humor é tom, não conteúdo. Nunca zombe do usuário e nunca deixe o humor atrapalhar a clareza da resposta.`;
+  }
+  return `Humor: ${pct}% — alto. Espelhe a energia com piadas curtas, ironia leve e comentários divertidos, sempre sem alvo no usuário e sem deixar o humor atrapalhar a ação.`;
+}
+
+/** Pega o humor + dicas de tom e de humor/sarcasmo (com o nível ajustado) numa frase curta para o prompt. */
+export function sentimentContext(text: string): string {
+  const r = analyzeSentiment(text);
+  const nivel = getHumorLevel();
+  return `Humor detectado do usuário: ${r.humor}${r.pistas.length ? ` (pistas: ${r.pistas.slice(0, 3).join(", ")})` : ""}. Nível de humor do ARES ajustado pelo usuário: ${nivel}% (0 = sério, 100 = máximo). ${toneGuidance(r.humor)} ${humorGuidance(r.humor, nivel)}`;
+}
+
+// ——— Estado de humor (client-side, sobrevive na sessão) ———
+let currentHumor: Humor = "neutro";
+let history: number[] = [];
+
+/** Atualiza o humor corrente com base num novo texto e devolve o humor novo. */
+export function updateHumor(text: string): Humor {
+  const r = analyzeSentiment(text);
+  // Média móvel curta: um texto sozinho não derruba/levanta tudo
+  history.push(r.score);
+  if (history.length > 8) history.shift();
+  const avg = history.reduce((a, b) => a + b, 0) / history.length;
+
+  if (avg <= -0.55) currentHumor = "tenso";
+  else if (avg <= -0.2) currentHumor = "triste";
+  else if (avg >= 0.55) currentHumor = "feliz";
+  else if (avg >= 0.2) currentHumor = "animado";
+  else currentHumor = "neutro";
+  return currentHumor;
+}
+
+export function getHumor(): Humor {
+  return currentHumor;
+}
+
+/** Rótulo amigável (para o HUD e para fala): "tenso" → "estressado". */
+export function humorLabel(h: Humor): string {
+  switch (h) {
+    case "tenso":
+      return "estressado";
+    case "triste":
+      return "triste";
+    case "animado":
+      return "animado";
+    case "feliz":
+      return "feliz";
+    default:
+      return "neutro";
+  }
+}
