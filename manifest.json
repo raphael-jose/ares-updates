@@ -1,17 +1,22 @@
 {
-  "versao": "20260809-233057",
+  "versao": "20260809-234134",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "app/api/tts/route.ts",
-      "url": "arquivos/a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101",
-      "sha256": "a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101"
+      "caminho": "arthemis.bat",
+      "url": "arquivos/5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e",
+      "sha256": "5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e"
     },
     {
-      "caminho": "lib/voice.ts",
-      "url": "arquivos/4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f",
-      "sha256": "4180c9557429fc3de09a86a7fef33be243ae0b4e32f619459cc18fa2c559137f"
+      "caminho": "loading.py",
+      "url": "arquivos/62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4",
+      "sha256": "62ae889244fe80b40d2a8e9a7a0745e1506ad3a03cb5c26d45f9de95184647c4"
+    },
+    {
+      "caminho": "__pycache__/loading.cpython-314.pyc",
+      "url": "arquivos/df4f0704f68c96d0387e70c4dcf747173a6292e510b91389e767527d1ad0d0ed",
+      "sha256": "df4f0704f68c96d0387e70c4dcf747173a6292e510b91389e767527d1ad0d0ed"
     }
   ]
 }
