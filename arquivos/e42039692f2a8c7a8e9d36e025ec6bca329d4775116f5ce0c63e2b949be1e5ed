@@ -1,0 +1,113 @@
+/**
+ * Visão do ARES — envia um screenshot (base64) para um modelo de visão
+ * gratuito e devolve a descrição/resposta. Estratégia (sem custo):
+ * 1. Nuvem compatível com OpenAI (KIWI_CLOUD_URL/KEY/MODEL) se o modelo for vision-capable;
+ * 2. Ollama (local KIWI_OLLAMA_URL ou cloud KIWI_OLLAMA_API_KEY) se o modelo for vision-capable.
+ *
+ * Retorna null quando não há modelo de visão configurado/acessível — o chamador
+ * deve cair no OCR (screen_read), que funciona sempre.
+ */
+
+const VISION_TIMEOUT_MS = Number(process.env.KIWI_VISION_TIMEOUT_MS ?? 45000);
+
+/** Detecta se um nome de modelo tem capacidade de visão (imagem). */
+export function isVisionModel(name: string): boolean {
+  const n = (name ?? "").toLowerCase();
+  return /gemini|vision|llava|bakllava|minicpm|pixtral|qwen.*-?vl|qwen2\.5-vl|qwen3-vl|llama3\.2-vision|gpt-4o|gpt-4\.1|gpt-5|claude/.test(
+    n,
+  );
+}
+
+/** Monta o prompt da imagem (tamanho final razoável para modelos locais). */
+function buildPrompt(pergunta: string): string {
+  const q = (pergunta ?? "").trim().slice(0, 400);
+  return `${q || "Descreva o que está visível na tela."}\n\nIMPORTANTE: responda em português do Brasil, de forma curta e objetiva (no máximo 5 linhas), como um assistente por voz falando com o usuário. Descreva janelas, textos, botões e elementos importantes que você enxergar na imagem.`;
+}
+
+/** Extrai o texto da resposta em formatos OpenAI e Ollama. */
+function extractText(data: any): string {
+  const c = data?.choices?.[0]?.message?.content ?? data?.message?.content ?? "";
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return c
+      .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
+/**
+ * Pergunta sobre um screenshot ao modelo de visão gratuito configurado.
+ * imageBase64 é o PNG sem o prefixo data:. Devolve o texto da resposta
+ * (trim) ou null se não houver modelo de visão disponível/acessível.
+ */
+export async function askVision(
+  pergunta: string,
+  imageBase64: string,
+): Promise<string | null> {
+  const dataUrl = `data:image/png;base64,${imageBase64}`;
+  const prompt = buildPrompt(pergunta);
+
+  // 1) Nuvem compatível com OpenAI (Gemini/Groq/etc via KIWI_CLOUD_*)
+  const cloudUrl = process.env.KIWI_CLOUD_URL;
+  const cloudKey = process.env.KIWI_CLOUD_KEY;
+  const cloudModel = process.env.KIWI_CLOUD_MODEL;
+  if (cloudUrl && cloudKey && cloudModel && isVisionModel(cloudModel)) {
+    try {
+      const res = await fetch(cloudUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cloudKey}` },
+        body: JSON.stringify({
+          model: cloudModel,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const text = extractText(await res.json());
+        if (text) return text.slice(0, 1200);
+      }
+    } catch {
+      /* cai para o Ollama */
+    }
+  }
+
+  // 2) Ollama (local ou cloud) com modelo de visão
+  const apiKey = process.env.KIWI_OLLAMA_API_KEY?.trim();
+  const base = (process.env.KIWI_OLLAMA_URL ?? (apiKey ? "https://ollama.com" : "http://localhost:11434")).trim();
+  const model = process.env.KIWI_OLLAMA_MODEL ?? (apiKey ? "deepseek-v4-flash:cloud" : "llama3.1");
+  if (isVisionModel(model)) {
+    try {
+      const res = await fetch(`${base.replace(/\/$/, "")}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          messages: [{ role: "user", content: prompt, images: [imageBase64] }],
+        }),
+        signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const text = extractText(await res.json());
+        if (text) return text.slice(0, 1200);
+      }
+    } catch {
+      /* sem visão disponível */
+    }
+  }
+
+  return null;
+}
