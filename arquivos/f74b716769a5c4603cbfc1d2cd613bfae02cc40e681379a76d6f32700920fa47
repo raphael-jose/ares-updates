@@ -1,0 +1,145 @@
+/**
+ * Cliente do servidor do WhatsApp do ARES.
+ *
+ * Garante o servidor rodando (spawn sob demanda do processo tsx) e expõe
+ * helpers tipados: status, enviar, conversas, mensagens e eventos novos.
+ * Tudo via HTTP em localhost — o servidor mantém a sessão viva entre chamadas.
+ */
+import { spawn, type ChildProcess } from "child_process";
+import path from "path";
+
+const PORT = Number(process.env.WHATSAPP_PORT ?? 38741);
+const BASE = `http://127.0.0.1:${PORT}`;
+const SCRIPT = path.join(process.cwd(), "scripts", "whatsapp-server.ts");
+
+let child: ChildProcess | null = null;
+let starting: Promise<boolean> | null = null;
+let lastEnsure = 0;
+
+function isUp(): Promise<boolean> {
+  return fetch(`${BASE}/status`, { signal: AbortSignal.timeout(1500) })
+    .then((r) => r.ok)
+    .catch(() => false);
+}
+
+function spawnServer(): ChildProcess {
+  // node --import tsx roda o servidor sem depender de npx na PATH (robusto em
+  // produção com next start). Node 20.6+ suporta --import.
+  child = spawn(process.execPath, ["--import", "tsx", SCRIPT], {
+    cwd: process.cwd(),
+    env: { ...process.env, WHATSAPP_PORT: String(PORT) },
+    stdio: "ignore",
+    detached: false,
+    windowsHide: true,
+  });
+  child.on("exit", () => {
+    child = null;
+  });
+  return child;
+}
+
+/**
+ * Garante que o servidor do WhatsApp esteja de pé (spawna e espera).
+ * Retorna true se ele responder dentro de ~45s (o primeiro boot carrega o
+ * puppeteer + whatsapp-web.js, o que demora alguns segundos).
+ */
+export async function ensureWhatsappServer(): Promise<boolean> {
+  const now = Date.now();
+  // Cache curto: não spawna em duplicata a cada chamada de ferramenta.
+  if (child && (await isUp())) return true;
+  if (starting) return starting;
+  if (now - lastEnsure < 2000 && (await isUp())) return true;
+  lastEnsure = now;
+
+  starting = (async () => {
+    if (await isUp()) return true;
+    spawnServer();
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      if (await isUp()) return true;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    return false;
+  })();
+  const ok = await starting;
+  starting = null;
+  return ok;
+}
+
+async function waFetch<T = unknown>(
+  pathname: string,
+  init?: RequestInit,
+): Promise<{ ok: boolean; status: number; data: T | null }> {
+  try {
+    const res = await fetch(`${BASE}${pathname}`, {
+      ...init,
+      signal: AbortSignal.timeout(20000),
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    });
+    const data = (await res.json().catch(() => null)) as T | null;
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+    };
+  }
+}
+
+export type WaStatus = {
+  connected: boolean;
+  ready: boolean;
+  qr: string | null;
+  qrAt: number;
+  lastError: string | null;
+  sessionExists: boolean;
+};
+
+export type WaChat = { id: string; name: string; lastMessage: string; at: number };
+export type WaMessage = { id: string; fromMe: boolean; body: string; at: number };
+export type WaEvent = { id: string; from: string; name: string; body: string; at: number };
+
+export async function waStatus(): Promise<WaStatus | null> {
+  const r = await waFetch<{ ok: boolean } & Partial<WaStatus>>("/status");
+  return r.ok && r.data ? (r.data as WaStatus) : null;
+}
+
+/** Envia mensagem. Retorna { ok, message } do servidor. */
+export async function waSend(
+  to: string,
+  message: string,
+): Promise<{ ok: boolean; message: string }> {
+  const r = await waFetch<{ ok: boolean; message: string }>("/send", {
+    method: "POST",
+    body: JSON.stringify({ to, message }),
+  });
+  if (r.status === 409) {
+    return { ok: false, message: r.data?.message ?? "WhatsApp não conectado." };
+  }
+  if (!r.ok || !r.data) {
+    return { ok: false, message: "Não consegui enviar pelo servidor do WhatsApp." };
+  }
+  return { ok: r.data.ok, message: r.data.message };
+}
+
+export async function waChats(): Promise<WaChat[]> {
+  const r = await waFetch<{ ok: boolean; chats?: WaChat[] }>("/chats");
+  return r.ok && r.data?.chats ? r.data.chats : [];
+}
+
+export async function waMessages(
+  chatId: string,
+  limit = 30,
+): Promise<{ name: string; messages: WaMessage[] } | null> {
+  const r = await waFetch<{ ok: boolean; name?: string; messages?: WaMessage[] }>(
+    `/messages?chat=${encodeURIComponent(chatId)}&limit=${limit}`,
+  );
+  if (!r.ok || !r.data) return null;
+  return { name: r.data.name ?? "?", messages: r.data.messages ?? [] };
+}
+
+export async function waEvents(since: number): Promise<WaEvent[]> {
+  const r = await waFetch<{ ok: boolean; events?: WaEvent[] }>(`/events?since=${since}`);
+  return r.ok && r.data?.events ? r.data.events : [];
+}
