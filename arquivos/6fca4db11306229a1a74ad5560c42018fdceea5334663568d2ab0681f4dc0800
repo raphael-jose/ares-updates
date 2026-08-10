@@ -1,0 +1,7 @@
+import type { ToolCall } from "./types";
+
+export interface BuiltinResult {
+  kind: "say" | "tool";
+  text?: string;
+  call?: ToolCall;
+}
