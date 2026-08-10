@@ -1,0 +1,182 @@
+/**
+ * Sinalização P2P por ID via broker MQTT público — a camada que torna o chat
+ * "adicionou o ID e conectou sozinho".
+ *
+ * - Presença: cada instância publica (retido) o próprio estado em
+ *   `ares/v1/presenca/<chave>` e assina o tópico dos contatos → online/offline
+ *   ao vivo, sem servidor nosso.
+ * - Sinalização: cada instância assina a própria caixa de entrada
+ *   `ares/v1/sinal/<chave>`; para chamar alguém, publica na caixa dela
+ *   {de, tipo, dados} — o `dados` carrega o blob de convite/resposta WebRTC.
+ *
+ * Nada de conteúdo de mensagem passa por aqui. O broker é só o "correio" do
+ * aperto de mão; o chat em si continua direto (WebRTC) e E2E.
+ */
+
+import { MqttCliente, type MqttMensagem } from "./mqtt";
+
+const PRES = "ares/v1/presenca/";
+const SINAL = "ares/v1/sinal/";
+const BROKER_PADRAO = "wss://broker.hivemq.com:8884/mqtt";
+
+/** Chave de tópico derivada do ID público (ex.: "Raphael#966" → "raphael966"). */
+export function chaveDe(idPublico: string): string {
+  return idPublico.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+export interface SinalRecebido {
+  de: string; // idPublico de quem enviou
+  deNome: string;
+  tipo: string; // "convite" | "resposta"
+  dados: string; // blob codificado
+  ts: number;
+}
+
+export interface SinalizadorOpcoes {
+  onConectado?: (ok: boolean) => void;
+  onPresenca?: (chave: string, online: boolean, nome?: string) => void;
+  onSinal?: (s: SinalRecebido) => void;
+}
+
+export class Sinalizador {
+  private mqtt: MqttCliente | null = null;
+  private url = BROKER_PADRAO;
+  private meuId = "";
+  private minhaChave = "";
+  private assinados = new Set<string>();
+  private fechado = false;
+  private heartbeatTimer: number | null = null;
+
+  constructor(private opcoes: SinalizadorOpcoes) {}
+
+  /** Busca a URL do broker (`.env` ARES_MQTT_URL; sem config, broker público) e conecta. */
+  async iniciar(idPublico: string): Promise<boolean> {
+    this.fechado = false;
+    this.meuId = idPublico;
+    this.minhaChave = chaveDe(idPublico);
+    try {
+      const r = await fetch("/api/sinal")
+        .then((x) => x.json())
+        .catch(() => null);
+      if (r && typeof r.url === "string" && r.url) this.url = r.url;
+    } catch {
+      /* usa o padrão */
+    }
+    const clientId = `ares-${this.minhaChave.slice(0, 10)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.mqtt = new MqttCliente(
+      this.url,
+      clientId,
+      {
+        onConectado: () => {
+          if (this.fechado) return;
+          // Presença retida + LWT "offline" (some sozinho ao desconectar)
+          this.publicarPresenca(true);
+          this.assinados.forEach((t) => this.mqtt?.assinar(t));
+          this.opcoes.onConectado?.(true);
+        },
+        onMensagem: (m) => this.tratar(m),
+        onFechado: () => this.opcoes.onConectado?.(false),
+      },
+      {
+        topic: PRES + this.minhaChave,
+        payload: new TextEncoder().encode(JSON.stringify({ online: false, nome: this.meuId, ts: Date.now() })),
+        retain: true,
+      },
+    );
+    this.mqtt.conectar();
+    // Heartbeat de presença: re-publica "online" (retido) a cada 30s. O LWT do
+    // broker marca "offline" quando uma aba fecha; se outra aba da MESMA
+    // identidade segue aberta (ou o app reabre), o heartbeat sobrescreve o
+    // status em até 30s — os contatos não ficam presos vendo "offline" com a
+    // IA online.
+    if (this.heartbeatTimer === null) {
+      this.heartbeatTimer = window.setInterval(() => {
+        if (!this.fechado && this.mqtt?.ativo) this.publicarPresenca(true);
+      }, 30_000);
+    }
+    return true;
+  }
+
+  /** Assina o tópico de presença de um contato (online/offline ao vivo). */
+  assinarPresenca(idPublico: string): void {
+    const t = PRES + chaveDe(idPublico);
+    if (this.assinados.has(t)) return;
+    this.assinados.add(t);
+    this.mqtt?.assinar(t);
+  }
+
+  /**
+   * Re-assina a presença de um contato FORÇANDO um novo SUBSCRIBE — o broker
+   * re-entrega a mensagem retida. Corrige o status travado em "offline"
+   * quando a presença do contato mudou enquanto a nossa assinatura já
+   * existia (o retido só é entregue em assinaturas novas).
+   */
+  reassinarPresenca(idPublico: string): void {
+    const t = PRES + chaveDe(idPublico);
+    this.assinados.delete(t);
+    this.assinados.add(t);
+    this.mqtt?.assinar(t);
+  }
+
+  /** Assina a própria caixa de entrada (convites/respostas). */
+  assinarInbox(): void {
+    const t = SINAL + this.minhaChave;
+    if (this.assinados.has(t)) return;
+    this.assinados.add(t);
+    this.mqtt?.assinar(t);
+  }
+
+  /** Publica a própria presença (retida — sobrevive a reloads). */
+  publicarPresenca(online: boolean): void {
+    this.mqtt?.publicar(
+      PRES + this.minhaChave,
+      new TextEncoder().encode(JSON.stringify({ online, nome: this.meuId, ts: Date.now() })),
+      true,
+    );
+  }
+
+  /** Envia um sinal (convite/resposta) para a caixa de entrada de outro ID. */
+  enviarSinal(paraId: string, tipo: string, dados: string): void {
+    this.mqtt?.publicar(
+      SINAL + chaveDe(paraId),
+      new TextEncoder().encode(
+        JSON.stringify({ de: this.meuId, deNome: this.meuId, tipo, dados, ts: Date.now() }),
+      ),
+    );
+  }
+
+  get conectado(): boolean {
+    return !!this.mqtt?.ativo;
+  }
+
+  fechar(): void {
+    this.fechado = true;
+    if (this.heartbeatTimer !== null) {
+      window.clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.mqtt?.fechar();
+    this.mqtt = null;
+  }
+
+  private tratar(m: MqttMensagem): void {
+    const topic = m.topic;
+    let j: { online?: boolean; nome?: string; de?: string; deNome?: string; tipo?: string; dados?: string; ts?: number };
+    try {
+      j = JSON.parse(new TextDecoder().decode(m.payload));
+    } catch {
+      return;
+    }
+    if (topic.startsWith(PRES)) {
+      this.opcoes.onPresenca?.(topic.slice(PRES.length), !!j.online, j.nome);
+    } else if (topic.startsWith(SINAL) && j.tipo && j.de && j.dados) {
+      this.opcoes.onSinal?.({
+        de: j.de,
+        deNome: j.deNome ?? j.de,
+        tipo: j.tipo,
+        dados: j.dados,
+        ts: j.ts ?? Date.now(),
+      });
+    }
+  }
+}
