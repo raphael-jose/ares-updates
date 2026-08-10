@@ -1,22 +1,12 @@
 {
-  "versao": "20260809-223449",
+  "versao": "20260809-224846",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "app/globals.css",
-      "url": "arquivos/6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b",
-      "sha256": "6edc13fddaaa851d1ff52e957af0c3b207eaaf9e6d3679033c16a87a6bb46f5b"
-    },
-    {
-      "caminho": "lib/atualizador.ts",
-      "url": "arquivos/518a036bd9cf9ceb511afdb834dafbdb8d2397414e67e6928531d2d16e985917",
-      "sha256": "518a036bd9cf9ceb511afdb834dafbdb8d2397414e67e6928531d2d16e985917"
-    },
-    {
-      "caminho": "next-env.d.ts",
-      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
-      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
+      "caminho": "lib/assistant.ts",
+      "url": "arquivos/8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48",
+      "sha256": "8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48"
     }
   ]
 }
