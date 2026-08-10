@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+/**
+ * subir-servidor.js — sobe o servidor (next dev) em SEGUNDO PLANO, sem
+ * JANELA de terminal nenhuma.
+ *
+ * Uso:  node subir-servidor.js [porta]
+ *
+ * Como funciona:
+ * - Espera a porta ficar livre (até 2 min) — usado após atualização, quando o
+ *   servidor antigo ainda segura a porta por ~1,5 s antes de sair.
+ * - Gera um VBS que roda o comando com JANELA OCULTA (windowStyle 0 do
+ *   WScript.Shell.Run) e o dispara via wscript.exe — wscript nunca abre
+ *   console, e o cmd escondido faz o npm/node herdarem o mesmo console oculto
+ *   (nenhuma janela aparece na árvore inteira).
+ * - Saída do servidor: .freebuff/server.log.
+ *
+ * O VBS é gerado aqui (Node), não no .bat — assim o comando sai limpo, sem
+ * metacaracteres escapados (o cmd do bat estraga &, > e aspas).
+ *
+ * Não usa TypeScript de propósito: roda com o Node que já existe na máquina.
+ */
+const { spawn } = require("child_process");
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+
+const raiz = path.resolve(__dirname, "..");
+const porta = process.argv[2] || process.env.PORT || "3000";
+
+/** true quando a porta não responde mais (livre para subir o servidor). */
+function portaLivre() {
+  return new Promise((resolve) => {
+    const req = http
+      .get({ host: "127.0.0.1", port: Number(porta), timeout: 2000 }, (res) => {
+        res.resume();
+        resolve(false); // alguém respondeu — porta ocupada
+      })
+      .on("error", () => resolve(true))
+      .on("timeout", () => {
+        req.destroy();
+        resolve(false); // sem resposta — considera ocupada e espera mais
+      });
+  });
+}
+
+function registrar(linha) {
+  try {
+    const dir = path.join(raiz, ".freebuff");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "server.log"), `\n[subir-servidor] ${linha}\n`);
+  } catch {
+    /* sem log disponível — nada a fazer */
+  }
+}
+
+(async () => {
+  // Espera a porta liberar (o servidor antigo fecha logo após a atualização).
+  const limite = Date.now() + 120_000;
+  while (!(await portaLivre()) && Date.now() < limite) {
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  const dir = path.join(raiz, ".freebuff");
+  fs.mkdirSync(dir, { recursive: true });
+  const log = path.join(dir, "server.log");
+  const vbs = path.join(dir, "subir-servidor.vbs");
+
+  // Comando do servidor: cd explícito para a raiz (nunca usa pasta pai como
+  // raiz), porta fixa e log. `""` no VBS = aspas literais dentro da string.
+  const cmd = `cmd /c cd /d ""${raiz}"" && set PORT=${porta} && npm run dev -- -p ${porta} -H 127.0.0.1 1>> ""${log}"" 2>&1`;
+  fs.writeFileSync(
+    vbs,
+    ['Set sh = CreateObject("WScript.Shell")', `sh.Run "${cmd}", 0, False`].join("\r\n"),
+    "utf-8"
+  );
+
+  // wscript nunca abre console; o VBS roda o cmd com janela oculta (SW_HIDE).
+  const child = spawn("wscript.exe", [vbs], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.on("error", (err) => registrar(`falha ao iniciar o servidor: ${err.message}`));
+  child.unref();
+  registrar(`servidor agendado na porta ${porta} (sem janela)`);
+  process.exit(0);
+})().catch((err) => {
+  registrar(`erro: ${err.message}`);
+  process.exit(1);
+});
