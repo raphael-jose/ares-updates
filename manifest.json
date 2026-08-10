@@ -1,10 +1,10 @@
 {
-  "versao": "20260810-170858",
+  "versao": "20260810-172719",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: confirmação de recepção (✓ entregue / ✓✓ visto) — cada mensagem enviada mostra se o destinatário recebeu e viu, com ACK automático",
-    "Chat P2P: correção na entrega de mídias grandes (imagem/vídeo/áudio fragmentados agora são decifrados corretamente)"
+    "Chat P2P: correção da entrega de imagens/vídeos/áudios — o caminho de fragmentação (chunks) estava descartando as mensagens grandes em silêncio; agora elas chegam e são confirmadas",
+    "Chat P2P: presença corrigida — se um contato aparecer offline para você, reabra o chat (ele re-assina a presença e atualiza o status)"
   ],
   "arquivos": [
     {
@@ -229,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/f239801dfebee9116cdbfd3a9c3a09f21eab70101f21cb6d18f75845c25e2a08",
-      "sha256": "f239801dfebee9116cdbfd3a9c3a09f21eab70101f21cb6d18f75845c25e2a08"
+      "url": "arquivos/7bbf84afcd3180c4f9699a27f294828be35aa0712283e1419993a2dbdb217338",
+      "sha256": "7bbf84afcd3180c4f9699a27f294828be35aa0712283e1419993a2dbdb217338"
     },
     {
       "caminho": "lib/agent/project.ts",
