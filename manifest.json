@@ -1,9 +1,11 @@
 {
-  "versao": "20260810-105843",
+  "versao": "20260810-111212",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "CORRE��O: feedbacks longos agora chegam por inteiro na �rea do dev (limite subiu de 800 para 2000 caracteres, alinhado ao campo de texto)"
+    "CHAT SIMPLIFICADO: a identidade agora desbloqueia automaticamente � sem pedir senha toda sess�o",
+    "Adicionou o ID (Nome#XXXX) e a outra IA online ? conex�o autom�tica em segundos, sem convite manual",
+    "Contatos adicionados enquanto o broker conectava tamb�m conectam sozinhos (recupera��o para todos os contatos)"
   ],
   "arquivos": [
     {
@@ -123,8 +125,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/8bbbde1e55eb0ae29e22f9be82d314fb98ccbd3ff4d2d73f3ec4ed12fb12670a",
-      "sha256": "8bbbde1e55eb0ae29e22f9be82d314fb98ccbd3ff4d2d73f3ec4ed12fb12670a"
+      "url": "arquivos/fb3dbb8003e2b1351f8bd6d44a6728ae85f671010dfa32dff5241728d6a34ce8",
+      "sha256": "fb3dbb8003e2b1351f8bd6d44a6728ae85f671010dfa32dff5241728d6a34ce8"
     },
     {
       "caminho": "instrumentation.ts",
@@ -178,8 +180,8 @@
     },
     {
       "caminho": "lib/agent/identity.ts",
-      "url": "arquivos/b882c3ca03103026074bf43e4ef344229c8a900bc64d094446a0c686b20529a9",
-      "sha256": "b882c3ca03103026074bf43e4ef344229c8a900bc64d094446a0c686b20529a9"
+      "url": "arquivos/c40d8c12bce5d7a050bb6d50ea668892ba98579e5a86cd84e4020e6dd67abd4f",
+      "sha256": "c40d8c12bce5d7a050bb6d50ea668892ba98579e5a86cd84e4020e6dd67abd4f"
     },
     {
       "caminho": "lib/agent/index.ts",
