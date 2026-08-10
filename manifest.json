@@ -1,12 +1,11 @@
 {
-  "versao": "20260810-124749",
+  "versao": "20260810-131123",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "Novo menu CONFIGURAÇÕES (botão CONFIG no HUD): modo ECO, voz (velocidade, tom, feminina/masculina), alertas da agenda, intervalo de atualizações, telemetria e identidade",
-    "Configurações consultáveis pela IA: persistidas no banco do app (~/.ares/settings.json) e incluídas na memória da Arthemis",
-    "Privacidade: a telemetria (erros e feedback) pode ser desligada direto no menu CONFIG",
-    "Botão para apagar uma resposta do desenvolvedor no painel de erros"
+    "Painel de voz (velocidade, tom, feminina/masculina) removido do HUD — os controles agora vivem no menu CONFIGURAÇÕES (sem duplicidade)",
+    "Privacidade: feed de atualizações, id da instalação e broker não aparecem mais na interface nem na API do navegador",
+    "Fingerprint ocultado da interface (cartão de identidade e verificação de contato)"
   ],
   "arquivos": [
     {
@@ -81,8 +80,8 @@
     },
     {
       "caminho": "app/api/settings/route.ts",
-      "url": "arquivos/07444807a3dc662125b8bb3294eec4c22435d20be5ab70b2bfa1e3b8345c02cc",
-      "sha256": "07444807a3dc662125b8bb3294eec4c22435d20be5ab70b2bfa1e3b8345c02cc"
+      "url": "arquivos/80fa8ad9ccbe992b7aefd013b14ad5994d9a4915fcf35becf947ea24381e8242",
+      "sha256": "80fa8ad9ccbe992b7aefd013b14ad5994d9a4915fcf35becf947ea24381e8242"
     },
     {
       "caminho": "app/api/sinal/route.ts",
@@ -141,8 +140,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/5bcb8ee29f4103e3da3ea7aa7a8bf57d21e4cf5213e78225ab31b39e1abac652",
-      "sha256": "5bcb8ee29f4103e3da3ea7aa7a8bf57d21e4cf5213e78225ab31b39e1abac652"
+      "url": "arquivos/cb8ff685beb8bee112c56fd6c53981a19b50cd3aafce7ef848db6d84db2f0188",
+      "sha256": "cb8ff685beb8bee112c56fd6c53981a19b50cd3aafce7ef848db6d84db2f0188"
     },
     {
       "caminho": "instrumentation.ts",
