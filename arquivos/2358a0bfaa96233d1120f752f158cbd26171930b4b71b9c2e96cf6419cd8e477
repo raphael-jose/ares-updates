@@ -1,0 +1,221 @@
+import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
+import path from "path";
+
+/**
+ * Controle financeiro do ARES: receitas e despesas persistidas em disco
+ * (~/.ares/finance.json), com resumo mensal e por categoria. Usado tanto pelas
+ * ferramentas do agente (LLM) quanto pelos comandos de voz locais (via
+ * /api/finance).
+ */
+
+export type TransacaoTipo = "receita" | "despesa";
+
+export interface Transacao {
+  /** Identificador único (usado para remover). */
+  id: string;
+  tipo: TransacaoTipo;
+  /** Valor em reais (sempre positivo; o sinal vem do tipo). */
+  valor: number;
+  categoria: string;
+  descricao?: string;
+  /** Timestamp (ms) do lançamento. */
+  quando: number;
+}
+
+export interface FinanceSummary {
+  saldo: number;
+  receitasMes: number;
+  despesasMes: number;
+  porCategoria: { categoria: string; total: number; count: number }[];
+  totalTransacoes: number;
+  ultimas: Transacao[];
+}
+
+interface FinanceData {
+  transacoes: Transacao[];
+}
+
+const CATEGORIAS_SUGERIDAS = [
+  "alimentação",
+  "transporte",
+  "moradia",
+  "lazer",
+  "saúde",
+  "educação",
+  "salário",
+  "outros",
+];
+
+const FINANCE_DIR = path.join(os.homedir(), ".ares");
+const FINANCE_FILE = path.join(FINANCE_DIR, "finance.json");
+
+let cache: FinanceData | null = null;
+let writeQueue: Promise<void> = Promise.resolve();
+
+function ensureLoaded(): FinanceData {
+  if (cache) return cache;
+  try {
+    const raw = fs.readFileSync(FINANCE_FILE, "utf8");
+    const parsed = JSON.parse(raw) as Partial<FinanceData>;
+    cache = {
+      transacoes: Array.isArray(parsed.transacoes)
+        ? parsed.transacoes
+            .filter(
+              (t): t is Transacao =>
+                !!t &&
+                (t.tipo === "receita" || t.tipo === "despesa") &&
+                Number.isFinite(t.valor) &&
+                t.valor > 0 &&
+                typeof t.categoria === "string",
+            )
+            .map((t) => ({
+              id: typeof t.id === "string" ? t.id : genId(),
+              tipo: t.tipo,
+              valor: t.valor,
+              categoria: t.categoria,
+              descricao: typeof t.descricao === "string" ? t.descricao : undefined,
+              quando: Number.isFinite(t.quando) ? t.quando : Date.now(),
+            }))
+            .sort((a, b) => b.quando - a.quando)
+        : [],
+    };
+  } catch {
+    cache = { transacoes: [] };
+  }
+  return cache;
+}
+
+function scheduleSave(): void {
+  const data = cache ?? { transacoes: [] };
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(FINANCE_DIR, { recursive: true });
+      await fsp.writeFile(FINANCE_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch {
+      /* gravação falhou, mas a sessão continua com os dados em cache */
+    }
+  });
+}
+
+function genId(): string {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function getCategorias(): string[] {
+  return CATEGORIAS_SUGERIDAS;
+}
+
+/** Lista as transações (mais recentes primeiro). */
+export function listTransacoes(limite = 100): Transacao[] {
+  return ensureLoaded().transacoes.slice(0, limite);
+}
+
+export function addTransacao(args: {
+  tipo: TransacaoTipo;
+  valor: number;
+  categoria: string;
+  descricao?: string;
+  quando?: number;
+}): Transacao {
+  const data = ensureLoaded();
+  const t: Transacao = {
+    id: genId(),
+    tipo: args.tipo,
+    valor: Math.max(0.01, Math.round(args.valor * 100) / 100),
+    categoria: (args.categoria || "outros").toLowerCase().trim(),
+    descricao: args.descricao?.trim() || undefined,
+    quando: args.quando && Number.isFinite(args.quando) ? args.quando : Date.now(),
+  };
+  data.transacoes.unshift(t);
+  scheduleSave();
+  return t;
+}
+
+/** Remove uma transação pelo id (ou pelo índice visível "#1"). */
+export function removeTransacao(ref: string): { ok: boolean; message: string } {
+  const data = ensureLoaded();
+  const idxMatch = ref.match(/^#(\d+)$/);
+  if (idxMatch) {
+    const i = Number(idxMatch[1]) - 1;
+    if (i >= 0 && i < data.transacoes.length) {
+      const [removida] = data.transacoes.splice(i, 1);
+      scheduleSave();
+      return { ok: true, message: `Removi: ${formatTransacao(removida)}` };
+    }
+    return { ok: false, message: "Não achei esse lançamento." };
+  }
+  const i = data.transacoes.findIndex((t) => t.id === ref);
+  if (i < 0) return { ok: false, message: "Não achei esse lançamento." };
+  const [removida] = data.transacoes.splice(i, 1);
+  scheduleSave();
+  return { ok: true, message: `Removi: ${formatTransacao(removida)}` };
+}
+
+/** Resumo financeiro: saldo total + totais e categorias do mês corrente. */
+export function financeSummary(): FinanceSummary {
+  const data = ensureLoaded();
+  const agora = new Date();
+  const mesInicio = new Date(agora.getFullYear(), agora.getMonth(), 1).getTime();
+  const todas = data.transacoes;
+  const doMes = todas.filter((t) => t.quando >= mesInicio);
+
+  const receitasMes = doMes
+    .filter((t) => t.tipo === "receita")
+    .reduce((s, t) => s + t.valor, 0);
+  const despesasMes = doMes
+    .filter((t) => t.tipo === "despesa")
+    .reduce((s, t) => s + t.valor, 0);
+
+  const porCat = new Map<string, { total: number; count: number }>();
+  for (const t of doMes) {
+    if (t.tipo !== "despesa") continue;
+    const e = porCat.get(t.categoria) ?? { total: 0, count: 0 };
+    e.total += t.valor;
+    e.count++;
+    porCat.set(t.categoria, e);
+  }
+  const porCategoria = [...porCat.entries()]
+    .map(([categoria, v]) => ({ categoria, total: v.total, count: v.count }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
+
+  const saldo =
+    todas.filter((t) => t.tipo === "receita").reduce((s, t) => s + t.valor, 0) -
+    todas.filter((t) => t.tipo === "despesa").reduce((s, t) => s + t.valor, 0);
+
+  return {
+    saldo: Math.round(saldo * 100) / 100,
+    receitasMes: Math.round(receitasMes * 100) / 100,
+    despesasMes: Math.round(despesasMes * 100) / 100,
+    porCategoria,
+    totalTransacoes: todas.length,
+    ultimas: todas.slice(0, 5),
+  };
+}
+
+export function formatValor(v: number): string {
+  return v.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
+export function formatTransacao(t: Transacao): string {
+  const sinal = t.tipo === "receita" ? "+" : "-";
+  const dia = new Date(t.quando).toLocaleDateString("pt-BR");
+  return `${sinal}${formatValor(t.valor)} (${t.categoria}${t.descricao ? `, ${t.descricao}` : ""}, ${dia})`;
+}
+
+export function formatResumoFalado(s: FinanceSummary): string {
+  const cats = s.porCategoria
+    .slice(0, 3)
+    .map((c) => `${c.categoria} ${formatValor(c.total)}`)
+    .join(", ");
+  let fala = `Seu saldo é de ${formatValor(s.saldo)}. Neste mês, você recebeu ${formatValor(
+    s.receitasMes,
+  )} e gastou ${formatValor(s.despesasMes)}.`;
+  if (cats) fala += ` Maiores gastos: ${cats}.`;
+  return fala;
+}
