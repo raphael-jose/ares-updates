@@ -1,9 +1,9 @@
 {
-  "versao": "20260810-142707",
+  "versao": "20260810-145733",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Voz mais limpa: artefatos do modelo (speak, xml, lang, pt-BR-FranciscaNeural, pontos e traços residuais) não são mais lidos em voz alta"
+    "Visual: scrollbars estilizadas com o tema (finas, brancas com brilho) e cursor de anel HUD branco no lugar do ponteiro padrão"
   ],
   "arquivos": [
     {
@@ -108,8 +108,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/b5d31fcf18adbfd504c9c77c94309c4df864d066c56e2acd215f381d7b8ddce6",
-      "sha256": "b5d31fcf18adbfd504c9c77c94309c4df864d066c56e2acd215f381d7b8ddce6"
+      "url": "arquivos/b2450b505c71945fed88797bc82c71c0acbd949889916ce536d52641a9fdcde5",
+      "sha256": "b2450b505c71945fed88797bc82c71c0acbd949889916ce536d52641a9fdcde5"
     },
     {
       "caminho": "app/icon.svg",
