@@ -1,0 +1,186 @@
+/**
+ * Telemetria de erros via MQTT (server-side).
+ *
+ * - Cada instalação PUBLICA suas falhas de ferramentas em `ares/v1/erros`
+ *   (JSON enxuto: hora, ação, ferramenta, motivo — sem dados sensíveis além
+ *   do próprio erro técnico, que o usuário já vê na tabela local).
+ * - A máquina do desenvolvedor (ARES_ERROS_RECEBER=1 ou ARES_DEV_MODE=1)
+ *   ASSINA o tópico e injeta os erros remotos na própria tabela, marcados
+ *   com `remoto: true` e a origem — assim o dev acompanha o que quebra nas
+ *   máquinas dos usuários direto na área de erros dele.
+ *
+ * Tudo é best-effort: se o broker cair, o registro local continua funcionando
+ * e a telemetria simplesmente não sai. Nunca bloqueia o fluxo principal.
+ */
+
+import { MqttCliente, type MqttMensagem } from "./mqtt";
+import fs from "fs";
+import os from "os";
+import path from "path";
+
+const TOPICO = "ares/v1/erros";
+const BROKER_PADRAO = "wss://broker.hivemq.com:8884/mqtt";
+
+let cliente: MqttCliente | null = null;
+let instalacaoId = "";
+
+function idInstalacao(): string {
+  if (instalacaoId) return instalacaoId;
+  const dir = path.join(os.homedir(), ".ares");
+  const arquivo = path.join(dir, "instalacao.json");
+  try {
+    if (fs.existsSync(arquivo)) {
+      const j = JSON.parse(fs.readFileSync(arquivo, "utf8")) as { id?: unknown };
+      if (typeof j.id === "string" && j.id) {
+        instalacaoId = j.id;
+        return instalacaoId;
+      }
+    }
+    instalacaoId = `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(arquivo, JSON.stringify({ id: instalacaoId }, null, 2), "utf8");
+  } catch {
+    instalacaoId = `inst-${Math.random().toString(36).slice(2, 12)}`;
+  }
+  return instalacaoId;
+}
+
+function urlBroker(): string {
+  return (process.env.ARES_MQTT_URL || "").trim() || BROKER_PADRAO;
+}
+
+export function enviarErros(): boolean {
+  return (process.env.ARES_ERROS_ENVIAR || "1") !== "0";
+}
+
+export function receberErros(): boolean {
+  return (process.env.ARES_ERROS_RECEBER || "") === "1" || process.env.ARES_DEV_MODE === "1";
+}
+
+// Fila de pendência: publicações feitas antes da conexão MQTT estabelecer
+// (ex.: a PRIMEIRA falha logo após o boot) são enviadas assim que conectar,
+// em vez de serem descartadas em silêncio.
+let pendentes: Uint8Array[] = [];
+let entregando = false;
+
+function esvaziarPendentes(): void {
+  if (entregando || !cliente?.ativo) return;
+  entregando = true;
+  try {
+    for (const payload of pendentes) cliente.publicar(TOPICO, payload);
+    pendentes = [];
+  } finally {
+    entregando = false;
+  }
+}
+
+/** Garante a conexão com o broker (lazy, com reconexão automática do cliente). */
+function obterCliente(): MqttCliente | null {
+  if (cliente) return cliente;
+  try {
+    cliente = new MqttCliente(urlBroker(), `ares-erros-${idInstalacao().slice(0, 20)}`, {
+      onConectado: () => {
+        if (receberErros()) cliente?.assinar(TOPICO);
+        esvaziarPendentes();
+      },
+      onMensagem: (m: MqttMensagem) => {
+        if (m.topic === TOPICO) receberMensagem(m);
+      },
+    });
+    cliente.conectar();
+    return cliente;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Publica uma falha local no tópico de erros (fire-and-forget).
+ * Chamado por registrarFalha() — nunca lança.
+ */
+export function publicarFalha(dados: { hora: string; acao: string; tool: string; erro: string }): void {
+  try {
+    if (!enviarErros()) return;
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        v: 1,
+        de: idInstalacao(),
+        hora: dados.hora,
+        acao: String(dados.acao ?? "").slice(0, 120),
+        tool: String(dados.tool ?? ""),
+        erro: String(dados.erro ?? "").slice(0, 400),
+        ts: Date.now(),
+      }),
+    );
+    const c = obterCliente();
+    if (!c) return;
+    if (!c.ativo) {
+      // Conecta e guarda — entrega assim que o broker responder.
+      pendentes.push(payload);
+      if (pendentes.length > 20) pendentes.splice(0, pendentes.length - 20);
+      return;
+    }
+    c.publicar(TOPICO, payload);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Erro remoto recebido, pronto para entrar na tabela local. */
+export interface ErroRemoto {
+  remoto: true;
+  de: string;
+  id: number;
+  hora: string;
+  iso: string;
+  acao: string;
+  tool: string;
+  erro: string;
+}
+
+let onErroRemoto: ((e: ErroRemoto) => void) | null = null;
+
+/** O módulo de erros registra aqui o callback para injetar remotos na tabela. */
+export function registrarReceptorErros(cb: (e: ErroRemoto) => void): void {
+  onErroRemoto = cb;
+}
+
+function receberMensagem(m: MqttMensagem): void {
+  try {
+    const txt = new TextDecoder().decode(m.payload);
+    const j = JSON.parse(txt) as {
+      v?: number;
+      de?: string;
+      hora?: string;
+      acao?: string;
+      tool?: string;
+      erro?: string;
+      ts?: number;
+    };
+    if (j.v !== 1 || !j.erro) return;
+    if (j.de === idInstalacao()) return; // não re-registra os próprios erros
+    const iso = new Date(j.ts ?? Date.now()).toISOString();
+    onErroRemoto?.({
+      remoto: true,
+      de: String(j.de ?? "?"),
+      id: (j.ts ?? Date.now()) * 100 + Math.floor(Math.random() * 90),
+      hora: j.hora ?? new Date(iso).toLocaleTimeString("pt-BR", { hour12: false }),
+      iso,
+      acao: j.acao ?? "erro remoto",
+      tool: (j.tool ?? "unknown") as ErroRemoto["tool"],
+      erro: j.erro,
+    });
+  } catch {
+    /* payload inválido — ignora */
+  }
+}
+
+/** Inicia a recepção de erros remotos no boot (máquina do dev). */
+export function iniciarReceptorErros(): void {
+  try {
+    if (!receberErros()) return;
+    obterCliente();
+  } catch {
+    /* best-effort */
+  }
+}
