@@ -1,0 +1,184 @@
+/**
+ * Publica uma atualização do ARES para todas as instalações do mundo.
+ *
+ * Uso:
+ *   npx tsx scripts/publicar-atualizacao.ts [--versao 1.2.3]
+ *
+ * O que faz:
+ *   1. Calcula o SHA-256 de todos os arquivos do projeto (ignorando
+ *      node_modules, .next, .env, .freebuff, dados etc.).
+ *   2. Compara com a última publicação (`.ares-update/publicacao-anterior.json`)
+ *      e lista só o que MUDOU desde então.
+ *   3. Gera `dist-atualizacao/` com `manifest.json` + um arquivo por mudança
+ *      (nomeado pelo hash — imutável e verificável).
+ *
+ * Depois é só enviar a pasta `dist-atualizacao` para o seu host estático
+ * (GitHub Pages, Netlify, VPS com nginx, qualquer lugar que sirva arquivos)
+ * e apontar `ARES_UPDATE_URL` no `.env` de cada instalação. Elas verificam
+ * o manifest periodicamente, baixam, conferem SHA-256 e instalam sozinhas,
+ * com a IA avisando em voz.
+ */
+
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+
+const RAIZ = process.cwd();
+const SAIDA = join(RAIZ, "dist-atualizacao");
+const BASELINE = join(RAIZ, ".ares-update", "publicacao-anterior.json");
+
+const IGNORAR = new Set([
+  ".env",
+  ".env.local",
+  ".freebuff",
+  ".ares-update",
+  "node_modules",
+  ".next",
+  ".git",
+  "data",
+  "dist-atualizacao",
+  "__pycache__",
+  "__pycache__",
+  "scripts/__pycache__",
+  "scripts/yt-dlp.exe", // binário estático — vem na instalação base
+  "por.traineddata", // dados de OCR estáticos — vêm na instalação base
+  "tsconfig.tsbuildinfo",
+]);
+
+interface Baseline {
+  versao: string;
+  arquivos: Record<string, string>; // caminho → sha256
+}
+
+function listarArquivos(dir: string, rel: string, saida: string[]): void {
+  for (const nome of readdirSync(dir, { withFileTypes: true })) {
+    if (nome.name.startsWith(".")) continue;
+    const relAtual = rel ? `${rel}/${nome.name}` : nome.name;
+    if (IGNORAR.has(relAtual) || IGNORAR.has(nome.name)) continue;
+    if (nome.isDirectory()) listarArquivos(join(dir, nome.name), relAtual, saida);
+    else if (nome.isFile()) saida.push(relAtual);
+  }
+}
+
+function sha256DoArquivo(caminho: string): string {
+  const buf = readFileSync(caminho);
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function carregarBaseline(): Baseline | null {
+  try {
+    if (!existsSync(BASELINE)) return null;
+    return JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
+  } catch {
+    return null;
+  }
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const idx = args.indexOf("--versao");
+  const versao = idx >= 0 && args[idx + 1] ? args[idx + 1] : timestampVersao();
+  // Notas de versão (changelog): vem por env ARES_NOTAS (evita problemas de
+  // quoting no Windows). Linhas separadas por \n.
+  const notas: string[] = (process.env.ARES_NOTAS || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Guarda contra corrupção de encoding: U+FFFD é o caractere de substituição
+  // que aparece quando os acentos se perdem no caminho (ex.: argumentos de CLI
+  // passando pelo cmd.exe, que usa a codepage OEM cp850). Falha com mensagem
+  // clara em vez de publicar notas que chegam "�rea" nas máquinas dos usuários.
+  const corrompidas = notas.filter((l) => l.includes("\uFFFD"));
+  if (corrompidas.length > 0) {
+    throw new Error(
+      `Notas de versão contêm caracteres corrompidos (U+FFFD). Linhas afetadas: ${corrompidas
+        .map((l) => JSON.stringify(l.slice(0, 60)))
+        .join(", ")} — digite as notas novamente e publique de novo.`,
+    );
+  }
+
+  console.log("── Publicando atualização do ARES ──");
+  const arquivos: string[] = [];
+  listarArquivos(RAIZ, "", arquivos);
+
+  const atual: Record<string, string> = {};
+  for (const rel of arquivos) atual[rel] = sha256DoArquivo(join(RAIZ, rel));
+
+  const anterior = carregarBaseline();
+  const mudaram = anterior
+    ? arquivos.filter((rel) => anterior.arquivos[rel] !== atual[rel])
+    : arquivos; // primeira publicação: inclui tudo
+
+  const npm = "package.json" in atual && (!anterior || anterior.arquivos["package.json"] !== atual["package.json"]);
+  const exigeReinicio =
+    npm || args.includes("--reinicio") || process.env.ARES_REINICIO === "1";
+
+  if (mudaram.length === 0 && !npm) {
+    console.log("Nada mudou desde a última publicação — manifest atualizado mesmo assim.");
+  }
+
+  // ── grava dist-atualizacao ──
+  // Manifest CUMULATIVO: lista TODOS os arquivos do projeto (não só o delta).
+  // Assim, uma instalação que ficou várias versões para trás recebe o estado
+  // completo na próxima verificação — sem depender de aplicar versões
+  // intermediárias uma a uma. Os arquivos são nomeados pelo SHA-256 e
+  // deduplicados, então a pasta `arquivos/` só cresce com conteúdo novo.
+  const arquivosDir = join(SAIDA, "arquivos");
+  mkdirSync(arquivosDir, { recursive: true });
+  const manifest = {
+    versao,
+    npm,
+    exigeReinicio,
+    ...(notas.length > 0 ? { notas } : {}),
+    arquivos: Object.keys(atual).map((rel) => ({
+      caminho: rel,
+      url: `arquivos/${atual[rel]}`,
+      sha256: atual[rel],
+    })),
+  };
+  writeFileSync(join(SAIDA, "manifest.json"), JSON.stringify(manifest, null, 2), "utf-8");
+
+  let bytes = 0;
+  for (const rel of Object.keys(atual)) {
+    const origem = join(RAIZ, rel);
+    const destino = join(arquivosDir, atual[rel]);
+    if (!existsSync(destino)) {
+      copyFileSync(origem, destino);
+      bytes += statSync(destino).size;
+    }
+  }
+
+  // ── salva baseline ──
+  mkdirSync(join(RAIZ, ".ares-update"), { recursive: true });
+  const novaBaseline: Baseline = { versao, arquivos: atual };
+  writeFileSync(BASELINE, JSON.stringify(novaBaseline, null, 2), "utf-8");
+
+  console.log(`Versão:    ${versao}`);
+  console.log(`Arquivos:  ${mudaram.length} alterados (${(bytes / 1024).toFixed(1)} KB)`);
+  if (notas.length > 0) console.log(`Notas:     ${notas.length} linha(s) — ${notas[0]}${notas.length > 1 ? " …" : ""}`);
+  console.log(`npm:       ${npm ? "sim (instala dependências)" : "não"}`);
+  console.log(`Reinício:  ${exigeReinicio ? "sim (servidor reinicia)" : "não (hot reload)"}`);
+  if (mudaram.length > 0 && mudaram.length <= 30) {
+    console.log("Alterados:");
+    for (const rel of mudaram) console.log(`  - ${rel}`);
+  }
+  console.log("");
+  console.log(`Pasta gerada: dist-atualizacao/ (${bytes > 0 ? `${(bytes / 1024).toFixed(1)} KB` : "sem arquivos novos"})`);
+  console.log("");
+  console.log("Próximos passos:");
+  console.log("  1. Envie a pasta dist-atualizacao para o seu host estático (ex.: GitHub Pages).");
+  console.log("  2. No .env das instalações, defina ARES_UPDATE_URL=https://SEU_HOST/dist-atualizacao");
+  console.log("  3. Pronto — as instâncias baixam e instalam sozinhas, avisando em voz.");
+}
+
+function timestampVersao(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+main().catch((e) => {
+  console.error("Falha ao publicar:", e);
+  process.exit(1);
+});
