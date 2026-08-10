@@ -1,9 +1,13 @@
 {
-  "versao": "20260810-003918",
+  "versao": "20260810-012116",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Correcao: app quebrava em 404 quando havia package-lock.json em pasta pai (raiz do Turbopack fixada)"
+    "Limpeza: arquivos inuteis e backups removidos (projeto mais leve)",
+    "HUD de voz movido para o lado esquerdo, abaixo do logo",
+    "Novo: checagem de raiz no boot avisa sobre package-lock orfao em pasta pai",
+    "arthemis.bat protegido contra raiz errada (cd explicito para a pasta do projeto)",
+    "Correcao: app quebrava em 404 com package-lock em pasta pai"
   ],
   "arquivos": [
     {
@@ -57,6 +61,11 @@
       "sha256": "440d83c578125672d9e7d2af9e0b7b0ff9a93efae94b7642a755aadbe81f7d82"
     },
     {
+      "caminho": "app/api/raiz/route.ts",
+      "url": "arquivos/cb04040c8fcaa33ad5092eb603f38976013860ce8fef1045919c52d2481aecda",
+      "sha256": "cb04040c8fcaa33ad5092eb603f38976013860ce8fef1045919c52d2481aecda"
+    },
+    {
       "caminho": "app/api/resumo/route.ts",
       "url": "arquivos/0dc23f913f8e72d923f9d3369c312823f8e288589aaf29898b85eb97f9663114",
       "sha256": "0dc23f913f8e72d923f9d3369c312823f8e288589aaf29898b85eb97f9663114"
@@ -88,8 +97,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/9ad069f8a0d3189f0b0880a94d977bbf1a11768fbd8725a763f2adea995dad90",
-      "sha256": "9ad069f8a0d3189f0b0880a94d977bbf1a11768fbd8725a763f2adea995dad90"
+      "url": "arquivos/bd7ef0d6638e0352394903a0e5c3c9cd6de9bc9897a73d7d77347b22a05a6728",
+      "sha256": "bd7ef0d6638e0352394903a0e5c3c9cd6de9bc9897a73d7d77347b22a05a6728"
     },
     {
       "caminho": "app/icon.svg",
@@ -108,8 +117,8 @@
     },
     {
       "caminho": "arthemis.bat",
-      "url": "arquivos/582e02ad412f4c6af9ecdf3ed37bc18e7de3f6907d40ddd6215eabb329866a2a",
-      "sha256": "582e02ad412f4c6af9ecdf3ed37bc18e7de3f6907d40ddd6215eabb329866a2a"
+      "url": "arquivos/dd9ebbe9ac08185e45c04cf99e487a36158aa511be86a3abc09107a87b6a4350",
+      "sha256": "dd9ebbe9ac08185e45c04cf99e487a36158aa511be86a3abc09107a87b6a4350"
     },
     {
       "caminho": "COMANDOS.md",
@@ -118,13 +127,13 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/226cb36aa13f7567f8fb5709542f02f7bfc656e83617472e1a1ac3d8256339fb",
-      "sha256": "226cb36aa13f7567f8fb5709542f02f7bfc656e83617472e1a1ac3d8256339fb"
+      "url": "arquivos/384e3d475958456f0c155ba709f3606800e3f95378431e406d41c014dce3c712",
+      "sha256": "384e3d475958456f0c155ba709f3606800e3f95378431e406d41c014dce3c712"
     },
     {
       "caminho": "instrumentation.ts",
-      "url": "arquivos/b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7",
-      "sha256": "b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7"
+      "url": "arquivos/6a3f2f288fed2d664254cc3e2ecbfd892a2cf0b7ecd35d08abca6bb76eed7e71",
+      "sha256": "6a3f2f288fed2d664254cc3e2ecbfd892a2cf0b7ecd35d08abca6bb76eed7e71"
     },
     {
       "caminho": "lib/agent/builtin.ts",
@@ -292,6 +301,11 @@
       "sha256": "8a047c4956f4b9fbd8749644f3ce9624e3b5a79f3a559601dfad92d3066b7892"
     },
     {
+      "caminho": "lib/raizCheck.ts",
+      "url": "arquivos/d26850704dc875eaaeaec84e502f536229df0a4ed0dba6d73b48d16d1e7ee38d",
+      "sha256": "d26850704dc875eaaeaec84e502f536229df0a4ed0dba6d73b48d16d1e7ee38d"
+    },
+    {
       "caminho": "lib/rppg.ts",
       "url": "arquivos/22c869c6b845b765a6befa464ef876e9e1528b60931875e834181afaa8732974",
       "sha256": "22c869c6b845b765a6befa464ef876e9e1528b60931875e834181afaa8732974"
@@ -333,8 +347,8 @@
     },
     {
       "caminho": "next-env.d.ts",
-      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
-      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
+      "url": "arquivos/4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac",
+      "sha256": "4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac"
     },
     {
       "caminho": "next.config.ts",
@@ -353,8 +367,8 @@
     },
     {
       "caminho": "README.md",
-      "url": "arquivos/8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2",
-      "sha256": "8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2"
+      "url": "arquivos/afb8f80d0f7965c397e5971837929399fc60d623d78005d37045c40075a0fdd7",
+      "sha256": "afb8f80d0f7965c397e5971837929399fc60d623d78005d37045c40075a0fdd7"
     },
     {
       "caminho": "scripts/ares-cli.ts",
@@ -363,8 +377,8 @@
     },
     {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/579f4d72129b33a419e877c507edd6a6290bafece689c9bb5e697e100398cba1",
-      "sha256": "579f4d72129b33a419e877c507edd6a6290bafece689c9bb5e697e100398cba1"
+      "url": "arquivos/110a3d1ffa7876b382924ae8678ee88d34f0b69c37bfb681ece951d8a2faf91b",
+      "sha256": "110a3d1ffa7876b382924ae8678ee88d34f0b69c37bfb681ece951d8a2faf91b"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
