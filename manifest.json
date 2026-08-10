@@ -1,7 +1,15 @@
 {
-  "versao": "20260810-090725",
+  "versao": "20260810-090956",
   "npm": false,
   "exigeReinicio": false,
+  "notas": [
+    "Removido o banner Raiz do projeto em risco (nao pede mais para mover a pasta)",
+    "Blur de fundo em todas as janelas do HUD - conteudo legivel sobre o orbe",
+    "Modo ECO mais leve para iGPUs antigas (menos particulas + bloom mais barato)",
+    "Novo: probe de FPS oculto com ?fps=1 na URL",
+    "arthemis.bat novo: sobe o servidor via npm run dev e abre o navegador automaticamente",
+    "Painel de voz sem caixa - texto flutuante com glow"
+  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
@@ -50,8 +58,8 @@
     },
     {
       "caminho": "app/api/publish/route.ts",
-      "url": "arquivos/440d83c578125672d9e7d2af9e0b7b0ff9a93efae94b7642a755aadbe81f7d82",
-      "sha256": "440d83c578125672d9e7d2af9e0b7b0ff9a93efae94b7642a755aadbe81f7d82"
+      "url": "arquivos/51336871570375eecbfd0c7b07e8eb8ba4aa48a0d01a8dc39e22e064ea6fd912",
+      "sha256": "51336871570375eecbfd0c7b07e8eb8ba4aa48a0d01a8dc39e22e064ea6fd912"
     },
     {
       "caminho": "app/api/resumo/route.ts",
