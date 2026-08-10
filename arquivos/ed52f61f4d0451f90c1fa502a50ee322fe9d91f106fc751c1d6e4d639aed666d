@@ -1,0 +1,29 @@
+import { NextResponse } from "next/server";
+import { responderFeedback } from "@/lib/agent/feedback";
+
+export const runtime = "nodejs";
+
+/**
+ * Dev responde a um feedback recebido:
+ *   POST /api/feedback/resposta { id, texto }
+ * Guarda a resposta no item e publica no MQTT (tópico por instalação) — o
+ * usuário que enviou recebe na área de erros dele.
+ */
+export async function POST(req: Request) {
+  let id = 0;
+  let texto = "";
+  try {
+    const b = (await req.json()) as { id?: unknown; texto?: unknown };
+    if (typeof b?.id === "number") id = b.id;
+    if (typeof b?.texto === "string") texto = b.texto.trim();
+  } catch {
+    /* corpo ausente */
+  }
+  if (!Number.isFinite(id) || id <= 0) {
+    return NextResponse.json({ ok: false, message: "Informe o id do feedback." }, { status: 400 });
+  }
+  if (!texto) {
+    return NextResponse.json({ ok: false, message: "Escreva a resposta antes de enviar." }, { status: 400 });
+  }
+  return NextResponse.json(responderFeedback(id, texto));
+}
