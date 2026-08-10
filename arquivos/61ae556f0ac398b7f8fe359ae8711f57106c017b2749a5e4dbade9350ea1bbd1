@@ -1,0 +1,184 @@
+@echo off
+setlocal
+title Arthemis Launcher
+cd /d "%~dp0"
+
+rem ============================================================
+rem  ARTHEMIS - launcher robusto
+rem  - instala Python/Node se faltarem - winget - silencioso
+rem  - instala edge-tts - voz neural - e dependencias do projeto
+rem  - escolhe uma porta livre se a 3000 estiver ocupada
+rem  - abre a janela de loading e o servidor em 2o plano
+rem  - tudo que acontece vai para .freebuff\launcher.log
+rem ============================================================
+
+rem Raiz ABSOLUTA do projeto - %~dp0 termina com barra - usada em todos os
+rem caminhos e para fixar o cwd do servidor, mesmo se o bat for aberto por
+rem atalho com "Iniciar em" apontando para outra pasta.
+set "RAIZ=%~dp0"
+set "STATUS=%RAIZ%.freebuff\loading-status.txt"
+set "LOG=%RAIZ%.freebuff\launcher.log"
+
+if not exist "%RAIZ%.freebuff" mkdir "%RAIZ%.freebuff"
+
+> "%LOG%" echo === Arthemis launcher iniciado ===
+> "%STATUS%" echo Verificando ambiente...
+
+rem ---------- garante o .env com a config TURN documentada ----------
+rem O .env e lido pelo Next.js (rotas /api/turn e /api/tts). Se faltar, cria
+rem a partir do .env.example; se existir sem TURN, anexa o bloco comentado -
+rem o usuario (ou o dev) so precisa descomentar e preencher com o seu relay.
+if not exist "%RAIZ%.env" (
+    if exist "%RAIZ%.env.example" (
+        copy /y "%RAIZ%.env.example" "%RAIZ%.env" >nul
+        >> "%LOG%" echo .env criado a partir do .env.example
+    ) else (
+        type nul > "%RAIZ%.env"
+        >> "%LOG%" echo .env criado vazio
+    )
+) else (
+    findstr /c:"TURN_URL" "%RAIZ%.env" >nul 2>&1
+    if errorlevel 1 (
+        >> "%RAIZ%.env" echo.
+        >> "%RAIZ%.env" echo # --- Chat P2P: relay TURN ---
+        >> "%RAIZ%.env" echo # POR PADRAO o app usa o relay publico gratuito (openrelay.metered.ca,
+        >> "%RAIZ%.env" echo # o mesmo de Nextcloud/Matrix/Jitsi) - conexao entre casas garantida de
+        >> "%RAIZ%.env" echo # fabrica, com os dados criptografados de ponta a ponta (o relay so ve
+        >> "%RAIZ%.env" echo # ciphertext). Para usar um relay PROPRIO (coturn num VPS), descomente:
+        >> "%RAIZ%.env" echo #   TURN_URL=turn:SEU-DOMINIO:3478?transport=udp
+        >> "%RAIZ%.env" echo #   TURN_USERNAME=usuario-do-turn
+        >> "%RAIZ%.env" echo #   TURN_PASSWORD=senha-do-turn
+        >> "%RAIZ%.env" echo # Para desligar o fallback publico de vez: ARES_TURN_PUBLICO=0
+        >> "%LOG%" echo TURN documentado no .env (fallback publico ativo por padrao)
+    ) else (
+        >> "%LOG%" echo .env OK - TURN ja presente
+    )
+)
+
+rem ---------- Python - precisa para a janela de loading e a voz neural ----------
+set "PYTHON="
+where pythonw >nul 2>nul && set "PYTHON=pythonw"
+if not defined PYTHON where python >nul 2>nul && set "PYTHON=python"
+if not defined PYTHON (
+    > "%STATUS%" echo Instalando Python...
+    >> "%LOG%" echo Instalando Python via winget...
+    winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements >> "%LOG%" 2>&1
+    where pythonw >nul 2>nul && set "PYTHON=pythonw"
+    if not defined PYTHON where python >nul 2>nul && set "PYTHON=python"
+    if not defined PYTHON (
+        > "%STATUS%" echo Python nao encontrado - baixe em python.org e rode de novo.
+        start "" https://www.python.org/downloads/
+        echo.
+        echo Python nao foi instalado. Baixe em python.org e rode o arthemis.bat de novo.
+        pause
+        exit /b 1
+    )
+)
+>> "%LOG%" echo Python OK: %PYTHON%
+
+rem ---------- voz neural edge-tts - melhor que a voz do navegador ----------
+> "%STATUS%" echo Preparando a voz...
+%PYTHON% -m pip install --user --quiet edge-tts >> "%LOG%" 2>&1
+
+rem ---------- Node.js ----------
+where node >nul 2>nul
+if errorlevel 1 (
+    > "%STATUS%" echo Instalando Node.js...
+    >> "%LOG%" echo Instalando Node.js via winget...
+    winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements >> "%LOG%" 2>&1
+    where node >nul 2>nul
+    if errorlevel 1 (
+        > "%STATUS%" echo Node.js nao encontrado - baixe em nodejs.org e rode de novo.
+        start "" https://nodejs.org/
+        echo.
+        echo Node.js nao foi instalado. Baixe em nodejs.org e rode o arthemis.bat de novo.
+        pause
+        exit /b 1
+    )
+)
+>> "%LOG%" echo Node OK: 
+where node >> "%LOG%" 2>&1
+
+rem ---------- dependencias do projeto - primeira vez ----------
+if not exist "%RAIZ%node_modules" (
+    > "%STATUS%" echo Instalando dependencias - primeira vez - pode demorar...
+    >> "%LOG%" echo npm install...
+    call npm install --no-audit --no-fund >> "%LOG%" 2>&1
+    if errorlevel 1 (
+        > "%STATUS%" echo Falha no npm install - veja .freebuff\launcher.log
+        echo.
+        echo Falha no npm install. Veja o log: .freebuff\launcher.log
+        pause
+        exit /b 1
+    )
+)
+
+rem ---------- o app JA esta no ar? abre o navegador e pronto ----------
+rem O Next.js 16 recusa subir um 2o dev server na MESMA pasta - "Another
+rem next dev server is already running" - mesmo em porta livre. Entao, se o
+rem app ja responde em alguma porta padrao, nao inicia outro: so abre o navegador.
+> "%STATUS%" echo Verificando se o app ja esta aberto...
+for %%P in (3000 3001 3002 3003 3004) do (
+    >nul 2>&1 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:%%P/' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }"
+    if not errorlevel 1 (
+        set "PORT=%%P"
+        goto app_ja_no_ar
+    )
+)
+
+rem ---------- porta livre - evita servidor nao sobe silencioso ----------
+set "PORT=3000"
+set "TENTATIVAS=3000 3001 3002 3003 3004"
+for %%P in (%TENTATIVAS%) do (
+    netstat -ano | findstr /r /c:":%%P .*LISTENING" >nul 2>&1
+    if errorlevel 1 (
+        set "PORT=%%P"
+        goto porta_ok
+    )
+)
+:porta_ok
+>> "%LOG%" echo Porta escolhida: %PORT%
+
+> "%STATUS%" echo Subindo o servidor na porta %PORT%...
+
+rem ---------- janela de loading + servidor em SEGUNDO PLANO (sem janela) ----------
+start "Arthemis Loading" /D "%RAIZ%" %PYTHON% "%RAIZ%loading.py" --port %PORT% --status "%STATUS%"
+rem O servidor sobe 100% em segundo plano via scripts\subir-servidor.js (Node):
+rem o helper gera um VBS com janela oculta (wscript) - nenhuma janela de
+rem terminal aparece. O script fixa a raiz do projeto por __dirname - mesmo se
+rem o bat for aberto por atalho com "Iniciar em" errado, o Turbopack nunca usa
+rem uma pasta pai como raiz nem o node_modules de outro lugar.
+call node "%RAIZ%scripts\subir-servidor.js" %PORT%
+
+rem ============================================================
+rem  Aguarda o servidor subir e ABRE O NAVEGADOR automaticamente
+rem  obrigatorio - nao depende de Python nem de mais nada.
+rem ============================================================
+> "%STATUS%" echo Aguardando o servidor na porta %PORT%...
+set /a TENT=0
+:aguardar_servidor
+set /a TENT+=1
+if %TENT% gtr 100 goto servidor_timeout
+rem Checa se o servidor responde HTTP 200 - PowerShell existe em todo Windows
+>nul 2>&1 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 }; exit 1 } catch { exit 1 }"
+if errorlevel 1 (
+    timeout /t 3 /nobreak >nul
+    goto aguardar_servidor
+)
+
+rem Servidor no ar - ou o app ja estava aberto - abre o navegador do usuario
+:app_ja_no_ar
+> "%STATUS%" echo Abrindo o navegador em http://127.0.0.1:%PORT%/
+start "" "http://127.0.0.1:%PORT%/"
+rem Sucesso: fecha o console do launcher sozinho - o loading estilizado (loading.py)
+rem fecha quando o servidor responde e o servidor segue oculto em segundo plano.
+exit /b 0
+
+:servidor_timeout
+> "%STATUS%" echo Servidor nao respondeu - veja .freebuff\server.log
+echo.
+echo  O servidor nao respondeu na porta %PORT% a tempo (5 min).
+echo  Veja o log: %RAIZ%.freebuff\server.log
+echo.
+pause
+exit /b 1
