@@ -1,10 +1,7 @@
 {
-  "versao": "20260810-092814",
+  "versao": "20260810-093058",
   "npm": false,
   "exigeReinicio": true,
-  "notas": [
-    "Verificacao de atualizacoes agora a cada 1 minuto (era 45 min) - atualizacoes chegam muito mais rapido"
-  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
