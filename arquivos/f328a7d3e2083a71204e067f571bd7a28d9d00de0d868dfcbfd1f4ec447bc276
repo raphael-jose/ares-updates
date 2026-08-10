@@ -1,0 +1,8 @@
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Header "X-Powered-By: Next.js" fora (menos bytes e menos fingerprint).
+  poweredByHeader: false,
+};
+
+export default nextConfig;
