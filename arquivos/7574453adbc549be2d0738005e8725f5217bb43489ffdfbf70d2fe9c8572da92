@@ -1,0 +1,69 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  addTransacao,
+  financeSummary,
+  formatResumoFalado,
+  listTransacoes,
+  removeTransacao,
+  type TransacaoTipo,
+} from "@/lib/agent/finance";
+
+export const runtime = "nodejs";
+
+/**
+ * API de controle financeiro do ARES.
+ * - GET        /api/finance          → resumo + últimas transações
+ * - GET        /api/finance?lista=1  → todas as transações
+ * - POST       /api/finance { acao: "add", tipo, valor, categoria, descricao? }
+ * - POST       /api/finance { acao: "remove", ref }
+ */
+export async function GET(req: NextRequest) {
+  const lista = req.nextUrl.searchParams.get("lista") === "1";
+  const resumo = financeSummary();
+  if (lista) {
+    return NextResponse.json({ ok: true, transacoes: listTransacoes(1000), resumo });
+  }
+  return NextResponse.json({ ok: true, resumo, falado: formatResumoFalado(resumo) });
+}
+
+export async function POST(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const acao = String(body.acao ?? "add");
+  if (acao === "remove") {
+    const ref = String(body.ref ?? "").trim();
+    if (!ref) {
+      return NextResponse.json(
+        { ok: false, message: "Diga qual lançamento remover (ex.: #1 ou a descrição)." },
+        { status: 400 },
+      );
+    }
+    const r = removeTransacao(ref);
+    return NextResponse.json(r.ok ? { ok: true, message: r.message } : r, {
+      status: r.ok ? 200 : 400,
+    });
+  }
+  // add
+  const tipoRaw = String(body.tipo ?? "").toLowerCase();
+  const tipo: TransacaoTipo =
+    tipoRaw === "receita" ? "receita" : tipoRaw === "despesa" ? "despesa" : "despesa";
+  const valor = Number(body.valor);
+  if (!Number.isFinite(valor) || valor <= 0) {
+    return NextResponse.json(
+      { ok: false, message: "Fale o valor — ex.: adiciona despesa de 50 reais em alimentação." },
+      { status: 400 },
+    );
+  }
+  const categoria = String(body.categoria ?? "outros").trim() || "outros";
+  const descricao = body.descricao ? String(body.descricao) : undefined;
+  const t = addTransacao({ tipo, valor, categoria, descricao });
+  const resumo = financeSummary();
+  return NextResponse.json({
+    ok: true,
+    transacao: t,
+    resumo,
+    message:
+      t.tipo === "receita"
+        ? `Registrei a receita de ${t.valor.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} em ${t.categoria}.`
+        : `Registrei a despesa de ${t.valor.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} em ${t.categoria}.`,
+  });
+}
