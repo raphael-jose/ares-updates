@@ -1,0 +1,99 @@
+import { NextRequest, NextResponse } from "next/server";
+import fs from "fs/promises";
+import path from "path";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// Extensões de texto puro (lidas direto)
+const TEXTO = new Set([
+  ".txt", ".md", ".markdown", ".ts", ".tsx", ".js", ".jsx", ".py", ".json",
+  ".csv", ".log", ".html", ".css", ".yml", ".yaml", ".ini", ".cfg", ".conf",
+  ".xml", ".sql", ".sh", ".bat", ".ps1",
+]);
+
+/**
+ * Resumo extrativo local: pega as N frases mais informativas (por comprimento
+ * e posição no texto). Rápido, sem rede — bom para voz.
+ * Exportada para os testes.
+ */
+export function resumoExtrativo(texto: string, maxFrases = 6): string {
+  const limpo = texto.replace(/\s+/g, " ").trim();
+  if (!limpo) return "";
+  const frases = limpo
+    .split(/(?<=[.!?])\s+/)
+    .map((f) => f.trim())
+    .filter((f) => f.length > 40 && f.length < 320);
+  if (frases.length <= maxFrases) return frases.join(" ");
+
+  // Pontua: comprimento médio + palavras incomuns (heurística simples)
+  const scored = frases.map((f, i) => {
+    const words = f.split(/\s+/);
+    const capLen = words.filter((w) => /^[A-ZÀ-Ú]/.test(w)).length;
+    const score = words.length * 1.2 + capLen * 0.8;
+    // Primeiras frases tendem a ser as mais importantes
+    return { f, i, score: score + Math.max(0, 8 - i) };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored
+    .slice(0, maxFrases)
+    .sort((a, b) => a.i - b.i)
+    .map((s) => s.f)
+    .join(" ");
+}
+
+/** Extrai texto de um .docx (XML interno do Word). */
+async function lerDocx(file: string): Promise<string> {
+  // jszip exporta via CJS/ESM interop: pega o default ou o módulo inteiro
+  const jszipMod = await import("jszip");
+  const JSZipClass = (jszipMod as { default?: { loadAsync: (b: Buffer) => unknown } }).default;
+  const loadAsync = JSZipClass?.loadAsync ?? (jszipMod as unknown as { loadAsync: (b: Buffer) => unknown }).loadAsync;
+  const buf = await fs.readFile(file);
+  const zip = (await loadAsync(buf)) as { file: (n: string) => { async: (t: string) => Promise<string | undefined> } | null };
+  const xml = await zip.file("word/document.xml")?.async("string");
+  if (!xml) return "";
+  // Remove as tags e junta parágrafos
+  return xml
+    .replace(/<w:p[^>]*>/g, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export async function GET(req: NextRequest) {
+  const caminho = req.nextUrl.searchParams.get("path")?.trim() ?? "";
+  const maxFrasesRaw = Number(req.nextUrl.searchParams.get("frases") ?? 6);
+  const maxFrases = Number.isFinite(maxFrasesRaw)
+    ? Math.max(2, Math.min(10, maxFrasesRaw))
+    : 6;
+  if (!caminho) {
+    return NextResponse.json({ ok: false, message: "Fale o caminho do arquivo." }, { status: 400 });
+  }
+  try {
+    const ext = path.extname(caminho).toLowerCase();
+    const isTexto = TEXTO.has(ext);
+    const isDocx = ext === ".docx";
+    if (!isTexto && !isDocx) {
+      return NextResponse.json(
+        { ok: false, message: `Não sei resumir arquivos ${ext || "sem extensão"}. Posso resumir texto, código e documentos .docx.` },
+        { status: 400 },
+      );
+    }
+    const raw = isDocx ? await lerDocx(caminho) : await fs.readFile(caminho, "utf8");
+    const texto = (raw ?? "").trim();
+    if (!texto) return NextResponse.json({ ok: false, message: "O arquivo está vazio." });
+    // Limite de segurança: 60 mil caracteres analisados
+    const amostra = texto.length > 60000 ? texto.slice(0, 60000) : texto;
+    const resumo = resumoExtrativo(amostra, maxFrases);
+    const nome = path.basename(caminho);
+    const stats = {
+      caracteres: texto.length,
+      palavras: texto.split(/\s+/).length,
+      linhas: texto.split(/\n/).length,
+    };
+    return NextResponse.json({ ok: true, nome, resumo, stats });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ ok: false, message: `Não consegui ler o arquivo: ${msg}` }, { status: 502 });
+  }
+}
