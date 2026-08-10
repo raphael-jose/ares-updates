@@ -1,9 +1,10 @@
 {
-  "versao": "20260810-145733",
+  "versao": "20260810-151335",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Visual: scrollbars estilizadas com o tema (finas, brancas com brilho) e cursor de anel HUD branco no lugar do ponteiro padrão"
+    "Chat: envio resiliente — mensagens sobrevivem a quedas curtas (reconexão automática) e o texto digitado nunca se perde em caso de falha",
+    "Chat: status honesto — contato só aparece online quando o canal está realmente aberto; avisos claros quando a conexão cai"
   ],
   "arquivos": [
     {
@@ -138,8 +139,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/eeef370cb3b60d692bbcc2f675b3414e14cf651a70255690af4e79b3b2a7395c",
-      "sha256": "eeef370cb3b60d692bbcc2f675b3414e14cf651a70255690af4e79b3b2a7395c"
+      "url": "arquivos/4b3864edbec001998cb3b93c24fc898f3acc86f98e1258fb714b5d99ce7bd3c1",
+      "sha256": "4b3864edbec001998cb3b93c24fc898f3acc86f98e1258fb714b5d99ce7bd3c1"
     },
     {
       "caminho": "instrumentation.ts",
@@ -228,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e",
-      "sha256": "36e48e7ddd115e38bfdd5b3b9f81ef9c096e5aeca88f9ab66c70ce8804f9dc2e"
+      "url": "arquivos/6030d581a62c5d68f6b75be41707d656edeca234d52447e2630721b470c37427",
+      "sha256": "6030d581a62c5d68f6b75be41707d656edeca234d52447e2630721b470c37427"
     },
     {
       "caminho": "lib/agent/project.ts",
