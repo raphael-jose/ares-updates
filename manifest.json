@@ -1,13 +1,9 @@
 {
-  "versao": "20260810-002835",
+  "versao": "20260810-003918",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Correcao: letras pretas ilegiveis nas janelas (agora brancas)",
-    "Correcao: texto de modo dev removido do painel do usuario",
-    "Novo: erros dos usuarios chegam para o dev (telemetria MQTT)",
-    "Correcao: voz neural volta a funcionar nos PCs (python/py/python3)",
-    "Launcher arthemis.bat mais robusto (porta livre + logs)"
+    "Correcao: app quebrava em 404 quando havia package-lock.json em pasta pai (raiz do Turbopack fixada)"
   ],
   "arquivos": [
     {
@@ -337,13 +333,13 @@
     },
     {
       "caminho": "next-env.d.ts",
-      "url": "arquivos/4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac",
-      "sha256": "4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac"
+      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
+      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
     },
     {
       "caminho": "next.config.ts",
-      "url": "arquivos/f328a7d3e2083a71204e067f571bd7a28d9d00de0d868dfcbfd1f4ec447bc276",
-      "sha256": "f328a7d3e2083a71204e067f571bd7a28d9d00de0d868dfcbfd1f4ec447bc276"
+      "url": "arquivos/3f875f8a9bffeefbe355c59366014501ddcd9150fece898dfa159b46b1d029e8",
+      "sha256": "3f875f8a9bffeefbe355c59366014501ddcd9150fece898dfa159b46b1d029e8"
     },
     {
       "caminho": "package-lock.json",
