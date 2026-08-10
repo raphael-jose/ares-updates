@@ -1,0 +1,16 @@
+import path from "path";
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Header "X-Powered-By: Next.js" fora (menos bytes e menos fingerprint).
+  poweredByHeader: false,
+  // Fixa a raiz do Turbopack no diretório do projeto. Sem isso, o Turbopack
+  // sobe a árvore procurando o package-lock.json mais próximo — se houver um
+  // órfão num diretório pai (ex.: a pasta do projeto dentro de outra pasta
+  // com package-lock), ele escolhe a raiz ERRADA e o app derruba em 404.
+  turbopack: {
+    root: __dirname,
+  },
+};
+
+export default nextConfig;
