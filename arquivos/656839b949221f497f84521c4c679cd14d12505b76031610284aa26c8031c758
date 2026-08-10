@@ -1,0 +1,463 @@
+/**
+ * Telemetria de erros via MQTT (server-side).
+ *
+ * - Cada instalação PUBLICA suas falhas de ferramentas em `ares/v1/erros`
+ *   (JSON enxuto: hora, ação, ferramenta, motivo — sem dados sensíveis além
+ *   do próprio erro técnico, que o usuário já vê na tabela local).
+ * - A máquina do desenvolvedor (ARES_ERROS_RECEBER=1 ou ARES_DEV_MODE=1)
+ *   ASSINA o tópico e injeta os erros remotos na própria tabela, marcados
+ *   com `remoto: true` e a origem — assim o dev acompanha o que quebra nas
+ *   máquinas dos usuários direto na área de erros dele.
+ *
+ * Tudo é best-effort: se o broker cair, o registro local continua funcionando
+ * e a telemetria simplesmente não sai. Nunca bloqueia o fluxo principal.
+ */
+
+import { MqttCliente, type MqttMensagem } from "./mqtt";
+import { getSettings } from "./settings";
+import fs from "fs";
+import os from "os";
+import path from "path";
+
+const TOPICO = "ares/v1/erros";
+const TOPICO_FEEDBACK = "ares/v1/feedback";
+/** Respostas do dev ao feedback de um usuário: tópico POR INSTALAÇÃO
+ *  (`ares/v1/feedback-resp/<instalacao>`). Cada máquina assina o próprio e o
+ *  dev publica no tópico da instalação que enviou o feedback. */
+const TOPICO_RESPOSTA_BASE = "ares/v1/feedback-resp";
+const BROKER_PADRAO = "wss://broker.hivemq.com:8884/mqtt";
+
+/** Teto prático do texto de um feedback/resposta do dev (~1 milhão de
+ *  caracteres — "ilimitado" na prática; só protege contra colagem gigante). */
+export const MAX_TEXTO_FB = 1_000_000;
+/** Limite de bytes por mensagem MQTT no broker público (HiveMQ limita
+ *  mensagens grandes). Textos maiores são divididos em partes de ~50 KB e
+ *  remontados na recepção (v:2 com cid/parte/total). */
+const CHUNK_BYTES = 50_000;
+
+function topicoResposta(inst: string): string {
+  return `${TOPICO_RESPOSTA_BASE}/${inst}`;
+}
+
+let cliente: MqttCliente | null = null;
+let instalacaoId = "";
+
+function idInstalacao(): string {
+  if (instalacaoId) return instalacaoId;
+  const dir = path.join(os.homedir(), ".ares");
+  const arquivo = path.join(dir, "instalacao.json");
+  try {
+    if (fs.existsSync(arquivo)) {
+      const j = JSON.parse(fs.readFileSync(arquivo, "utf8")) as { id?: unknown };
+      if (typeof j.id === "string" && j.id) {
+        instalacaoId = j.id;
+        return instalacaoId;
+      }
+    }
+    instalacaoId = `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(arquivo, JSON.stringify({ id: instalacaoId }, null, 2), "utf8");
+  } catch {
+    instalacaoId = `inst-${Math.random().toString(36).slice(2, 12)}`;
+  }
+  return instalacaoId;
+}
+
+function urlBroker(): string {
+  return (process.env.ARES_MQTT_URL || "").trim() || BROKER_PADRAO;
+}
+
+export function enviarErros(): boolean {
+  // O menu CONFIGURAÇÕES pode desligar a telemetria em ~/.ares/settings.json
+  // (prioridade sobre o .env — a privacidade do usuário manda).
+  try {
+    return getSettings().telemetriaEnviar;
+  } catch {
+    return (process.env.ARES_ERROS_ENVIAR || "1") !== "0";
+  }
+}
+
+export function receberErros(): boolean {
+  try {
+    return getSettings().telemetriaReceber;
+  } catch {
+    return (process.env.ARES_ERROS_RECEBER || "") === "1" || process.env.ARES_DEV_MODE === "1";
+  }
+}
+
+// Fila de pendência: publicações feitas antes da conexão MQTT estabelecer
+// (ex.: a PRIMEIRA falha logo após o boot) são enviadas assim que conectar,
+// em vez de serem descartadas em silêncio.
+let pendentes: { topic: string; payload: Uint8Array }[] = [];
+let entregando = false;
+
+function esvaziarPendentes(): void {
+  if (entregando || !cliente?.ativo) return;
+  entregando = true;
+  try {
+    for (const p of pendentes) cliente.publicar(p.topic, p.payload);
+    pendentes = [];
+  } finally {
+    entregando = false;
+  }
+}
+
+/** Garante a conexão com o broker (lazy, com reconexão automática do cliente). */
+function obterCliente(): MqttCliente | null {
+  if (cliente) return cliente;
+  try {
+    cliente = new MqttCliente(urlBroker(), `ares-erros-${idInstalacao().slice(0, 20)}`, {
+      onConectado: () => {
+        // TODAS as máquinas ouvem as respostas do dev ao próprio feedback.
+        cliente?.assinar(topicoResposta(idInstalacao()));
+        if (receberErros()) {
+          cliente?.assinar(TOPICO);
+          cliente?.assinar(TOPICO_FEEDBACK);
+        }
+        esvaziarPendentes();
+      },
+      onMensagem: (m: MqttMensagem) => {
+        if (m.topic === TOPICO) receberMensagem(m);
+        else if (m.topic === TOPICO_FEEDBACK) receberFeedback(m);
+        else if (m.topic.startsWith(TOPICO_RESPOSTA_BASE + "/")) receberResposta(m);
+      },
+    });
+    cliente.conectar();
+    return cliente;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Publica uma falha local no tópico de erros (fire-and-forget).
+ * Chamado por registrarFalha() — nunca lança.
+ */
+export function publicarFalha(dados: { hora: string; acao: string; tool: string; erro: string }): void {
+  try {
+    if (!enviarErros()) return;
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        v: 1,
+        de: idInstalacao(),
+        hora: dados.hora,
+        acao: String(dados.acao ?? "").slice(0, 120),
+        tool: String(dados.tool ?? ""),
+        erro: String(dados.erro ?? "").slice(0, 400),
+        ts: Date.now(),
+      }),
+    );
+    const c = obterCliente();
+    if (!c) return;
+    if (!c.ativo) {
+      // Conecta e guarda — entrega assim que o broker responder.
+      pendentes.push({ topic: TOPICO, payload });
+      if (pendentes.length > 20) pendentes.splice(0, pendentes.length - 20);
+      return;
+    }
+    c.publicar(TOPICO, payload);
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ——— Texto longo: divide em partes MQTT e remonta na recepção ———
+
+/** Divide o texto em partes por CARACTERES (Array.from não quebra emojis/
+ *  surrogate pairs), respeitando o teto de bytes por mensagem do broker. */
+function dividirTexto(texto: string): string[] {
+  const partes: string[] = [];
+  let atual = "";
+  let bytes = 0;
+  for (const ch of Array.from(texto)) {
+    const nb = new TextEncoder().encode(ch).byteLength;
+    if (atual && bytes + nb > CHUNK_BYTES) {
+      partes.push(atual);
+      atual = "";
+      bytes = 0;
+    }
+    atual += ch;
+    bytes += nb;
+  }
+  if (atual) partes.push(atual);
+  return partes;
+}
+
+/** Publica um texto longo (feedback ou resposta do dev) no tópico. Mensagem
+ *  única (v:1 — compatível com versões antigas) se couber no limite; senão
+ *  divide em várias mensagens v:2 { cid, parte, total } que a recepção
+ *  remonta na ordem. Best-effort: se o broker estiver offline, enfileira. */
+function publicarTexto(
+  topic: string,
+  base: { de: string; hora: string; ts: number },
+  texto: string,
+): void {
+  const c = obterCliente();
+  if (!c) return;
+  const enviar = (payload: Uint8Array) => {
+    if (!c.ativo) {
+      pendentes.push({ topic, payload });
+      return;
+    }
+    c.publicar(topic, payload);
+  };
+  const unica = new TextEncoder().encode(JSON.stringify({ v: 1, ...base, texto }));
+  if (unica.byteLength <= CHUNK_BYTES) {
+    enviar(unica);
+    return;
+  }
+  const partes = dividirTexto(texto);
+  const cid = `${base.ts.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  for (let i = 0; i < partes.length; i++) {
+    enviar(
+      new TextEncoder().encode(
+        JSON.stringify({ v: 2, ...base, cid, parte: i, total: partes.length, texto: partes[i] }),
+      ),
+    );
+  }
+}
+
+/**
+ * Publica o feedback/sugestão de um usuário no tópico de feedback (fire-and-
+ * forget, best-effort). O dev recebe na área de erros dele via MQTT.
+ * O texto NÃO é truncado — textos longos são divididos em partes (v:2).
+ */
+export function publicarFeedback(dados: { hora: string; texto: string }): void {
+  try {
+    if (!enviarErros()) return;
+    publicarTexto(
+      TOPICO_FEEDBACK,
+      { de: idInstalacao(), hora: dados.hora, ts: Date.now() },
+      String(dados.texto ?? "").slice(0, MAX_TEXTO_FB),
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Erro remoto recebido, pronto para entrar na tabela local. */
+export interface ErroRemoto {
+  remoto: true;
+  de: string;
+  id: number;
+  hora: string;
+  iso: string;
+  acao: string;
+  tool: string;
+  erro: string;
+}
+
+let onErroRemoto: ((e: ErroRemoto) => void) | null = null;
+
+/** O módulo de erros registra aqui o callback para injetar remotos na tabela. */
+export function registrarReceptorErros(cb: (e: ErroRemoto) => void): void {
+  onErroRemoto = cb;
+}
+
+function receberMensagem(m: MqttMensagem): void {
+  try {
+    const txt = new TextDecoder().decode(m.payload);
+    const j = JSON.parse(txt) as {
+      v?: number;
+      de?: string;
+      hora?: string;
+      acao?: string;
+      tool?: string;
+      erro?: string;
+      ts?: number;
+    };
+    if (j.v !== 1 || !j.erro) return;
+    if (j.de === idInstalacao()) return; // não re-registra os próprios erros
+    const iso = new Date(j.ts ?? Date.now()).toISOString();
+    onErroRemoto?.({
+      remoto: true,
+      de: String(j.de ?? "?"),
+      id: (j.ts ?? Date.now()) * 100 + Math.floor(Math.random() * 90),
+      hora: j.hora ?? new Date(iso).toLocaleTimeString("pt-BR", { hour12: false }),
+      iso,
+      acao: j.acao ?? "erro remoto",
+      tool: (j.tool ?? "unknown") as ErroRemoto["tool"],
+      erro: j.erro,
+    });
+  } catch {
+    /* payload inválido — ignora */
+  }
+}
+
+/** Inicia a recepção no boot: conecta SEMPRE ao broker (toda máquina assina o
+ *  próprio tópico de respostas do feedback); os tópicos de erros/feedback são
+ *  assinados apenas na máquina do dev (ver onConectado). */
+export function iniciarReceptorErros(): void {
+  try {
+    obterCliente();
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ——— Remontagem de mensagens em partes (texto longo) ———
+
+interface ParteBuf {
+  de: string;
+  hora: string;
+  ts: number;
+  total: number;
+  partes: Map<number, string>;
+  quando: number;
+}
+
+const acumulandoPartes = new Map<string, ParteBuf>();
+
+/** Registra uma parte recebida (v:2). Devolve o texto completo quando TODAS
+ *  as partes chegaram (na ordem), ou null enquanto faltam pedaços. */
+function acumularParte(j: {
+  de?: string;
+  hora?: string;
+  ts?: number;
+  cid?: string;
+  parte?: number;
+  total?: number;
+  texto?: string;
+}): { de: string; hora: string; ts: number; texto: string } | null {
+  if (typeof j.cid !== "string" || typeof j.parte !== "number" || typeof j.total !== "number") return null;
+  let buf = acumulandoPartes.get(j.cid);
+  if (!buf) {
+    buf = {
+      de: String(j.de ?? "?"),
+      hora: j.hora ?? "",
+      ts: j.ts ?? Date.now(),
+      total: j.total,
+      partes: new Map(),
+      quando: Date.now(),
+    };
+    acumulandoPartes.set(j.cid, buf);
+  }
+  buf.partes.set(j.parte, String(j.texto ?? ""));
+  // Descarta acumuladores velhos/incompletos para não vazar memória.
+  if (acumulandoPartes.size > 64) {
+    const agora = Date.now();
+    for (const [k, v] of acumulandoPartes) if (agora - v.quando > 120_000) acumulandoPartes.delete(k);
+  }
+  let completo = true;
+  for (let i = 0; i < buf.total; i++) {
+    if (!buf.partes.has(i)) {
+      completo = false;
+      break;
+    }
+  }
+  if (!completo) return null;
+  acumulandoPartes.delete(j.cid);
+  const texto = Array.from({ length: buf.total }, (_, i) => buf!.partes.get(i) ?? "").join("");
+  return { de: buf.de, hora: buf.hora, ts: buf.ts, texto };
+}
+
+// ——— Feedback de usuários ———
+
+export interface FeedbackRecebido {
+  de: string;
+  hora: string;
+  ts: number;
+  texto: string;
+}
+
+let onFeedback: ((f: FeedbackRecebido) => void) | null = null;
+
+/** O módulo de feedback registra aqui o callback para persistir/injetar. */
+export function registrarReceptorFeedback(cb: (f: FeedbackRecebido) => void): void {
+  onFeedback = cb;
+}
+
+function receberFeedback(m: MqttMensagem): void {
+  try {
+    const j = JSON.parse(new TextDecoder().decode(m.payload)) as {
+      v?: number;
+      de?: string;
+      hora?: string;
+      texto?: string;
+      ts?: number;
+      cid?: string;
+      parte?: number;
+      total?: number;
+    };
+    if (j.de === idInstalacao()) return; // não re-registra o próprio feedback
+    if (j.v === 2) {
+      const completo = acumularParte(j);
+      if (completo) onFeedback?.(completo);
+      return;
+    }
+    if (j.v !== 1 || !j.texto) return;
+    onFeedback?.({
+      de: String(j.de ?? "?"),
+      hora: j.hora ?? new Date(j.ts ?? Date.now()).toLocaleTimeString("pt-BR", { hour12: false }),
+      ts: j.ts ?? Date.now(),
+      texto: j.texto,
+    });
+  } catch {
+    /* payload inválido — ignora */
+  }
+}
+
+// ——— Resposta do dev ao feedback do usuário ———
+
+export interface RespostaRecebida {
+  de: string; // id da instalação do dev
+  hora: string;
+  ts: number;
+  texto: string;
+}
+
+let onResposta: ((r: RespostaRecebida) => void) | null = null;
+
+/** O módulo de feedback registra aqui o callback para persistir a resposta. */
+export function registrarReceptorResposta(cb: (r: RespostaRecebida) => void): void {
+  onResposta = cb;
+}
+
+function receberResposta(m: MqttMensagem): void {
+  try {
+    const j = JSON.parse(new TextDecoder().decode(m.payload)) as {
+      v?: number;
+      de?: string;
+      hora?: string;
+      texto?: string;
+      ts?: number;
+      cid?: string;
+      parte?: number;
+      total?: number;
+    };
+    if (j.de === idInstalacao()) return; // não re-registra a própria resposta
+    if (j.v === 2) {
+      const completo = acumularParte(j);
+      if (completo) onResposta?.(completo);
+      return;
+    }
+    if (j.v !== 1 || !j.texto) return;
+    onResposta?.({
+      de: String(j.de ?? "?"),
+      hora: j.hora ?? new Date(j.ts ?? Date.now()).toLocaleTimeString("pt-BR", { hour12: false }),
+      ts: j.ts ?? Date.now(),
+      texto: j.texto,
+    });
+  } catch {
+    /* payload inválido — ignora */
+  }
+}
+
+/** Publica a resposta do dev no tópico da instalação que enviou o feedback.
+ *  O texto NÃO é truncado — textos longos são divididos em partes (v:2). */
+export function publicarRespostaFeedback(deInst: string, texto: string): void {
+  try {
+    if (!enviarErros() || !deInst) return;
+    publicarTexto(
+      topicoResposta(deInst),
+      {
+        de: idInstalacao(),
+        hora: new Date().toLocaleTimeString("pt-BR", { hour12: false }),
+        ts: Date.now(),
+      },
+      String(texto ?? "").slice(0, MAX_TEXTO_FB),
+    );
+  } catch {
+    /* best-effort */
+  }
+}
