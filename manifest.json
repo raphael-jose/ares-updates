@@ -1,9 +1,9 @@
 {
-  "versao": "20260810-105411",
+  "versao": "20260810-105843",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "CORRE��O: feedbacks dos usu�rios agora chegam na �rea do dev � o painel estava com cache antigo e n�o relia o arquivo de feedback recebido"
+    "CORRE��O: feedbacks longos agora chegam por inteiro na �rea do dev (limite subiu de 800 para 2000 caracteres, alinhado ao campo de texto)"
   ],
   "arquivos": [
     {
@@ -123,8 +123,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/3fa2d55f60cbb60bf32b85c10f9d84ffbb5465cb12a2d958f290f1db0ed912fe",
-      "sha256": "3fa2d55f60cbb60bf32b85c10f9d84ffbb5465cb12a2d958f290f1db0ed912fe"
+      "url": "arquivos/8bbbde1e55eb0ae29e22f9be82d314fb98ccbd3ff4d2d73f3ec4ed12fb12670a",
+      "sha256": "8bbbde1e55eb0ae29e22f9be82d314fb98ccbd3ff4d2d73f3ec4ed12fb12670a"
     },
     {
       "caminho": "instrumentation.ts",
@@ -153,8 +153,8 @@
     },
     {
       "caminho": "lib/agent/errosMqtt.ts",
-      "url": "arquivos/25f79ef5f112c367b22ca966ce92745054f025951b7caf2ac30c30efe6bf2093",
-      "sha256": "25f79ef5f112c367b22ca966ce92745054f025951b7caf2ac30c30efe6bf2093"
+      "url": "arquivos/c038e08a38c1affa7ec4e3e79a911e128e972477a3ca89670b97f9d76a913797",
+      "sha256": "c038e08a38c1affa7ec4e3e79a911e128e972477a3ca89670b97f9d76a913797"
     },
     {
       "caminho": "lib/agent/executor.ts",
