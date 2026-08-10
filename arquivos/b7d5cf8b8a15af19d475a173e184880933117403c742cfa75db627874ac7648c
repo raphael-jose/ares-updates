@@ -1,0 +1,181 @@
+/**
+ * Conversão de medidas (comprimento, massa, volume, velocidade, tempo,
+ * temperatura e dados) sem depender de API externa.
+ */
+
+type UnitKind =
+  | "length"
+  | "mass"
+  | "volume"
+  | "speed"
+  | "time"
+  | "data"
+  | "temp";
+
+interface UnitCode {
+  kind: UnitKind;
+  /** Fator para a unidade base (não usado em temperatura). */
+  factor: number;
+}
+
+const norm = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+// Alias → código canônico da unidade (as chaves já estão normalizadas)
+const UNIT_ALIASES: Record<string, string> = {
+  // Comprimento (base: metro)
+  metro: "m", metros: "m", m: "m",
+  quilometro: "km", quilometros: "km", kilometros: "km", km: "km",
+  centimetro: "cm", centimetros: "cm", cm: "cm",
+  milimetro: "mm", milimetros: "mm", mm: "mm",
+  polegada: "in", polegadas: "in", in: "in",
+  pe: "ft", pes: "ft", pezinhos: "ft", ft: "ft",
+  jarda: "yd", jardas: "yd", yd: "yd",
+  milha: "mi", milhas: "mi", mi: "mi",
+  // Massa (base: quilograma)
+  grama: "g", gramas: "g", g: "g",
+  quilograma: "kg", quilogramas: "kg", quilo: "kg", quilos: "kg", kg: "kg",
+  tonelada: "t", toneladas: "t", t: "t",
+  libra: "lb", libras: "lb", lb: "lb",
+  onca: "oz", oncas: "oz", oz: "oz",
+  // Volume (base: litro)
+  litro: "l", litros: "l", l: "l",
+  mililitro: "ml", mililitros: "ml", ml: "ml",
+  "metro cubico": "m3", "metros cubicos": "m3", m3: "m3",
+  "centimetro cubico": "cm3", "centimetros cubicos": "cm3", cm3: "cm3",
+  galao: "gal", galoes: "gal", gal: "gal",
+  // Velocidade (base: m/s)
+  "km/h": "kmh", "kmh": "kmh", "kph": "kmh",
+  "quilometro por hora": "kmh", "quilometros por hora": "kmh",
+  "m/s": "ms", "metros por segundo": "ms", "metro por segundo": "ms",
+  mph: "mph", "milhas por hora": "mph", "milha por hora": "mph",
+  // Tempo (base: segundo)
+  segundo: "s", segundos: "s", s: "s",
+  minuto: "min", minutos: "min", min: "min",
+  hora: "h", horas: "h", h: "h",
+  dia: "d", dias: "d",
+  semana: "sem", semanas: "sem",
+  // Dados (base: byte)
+  byte: "b", bytes: "b", b: "b",
+  kilobyte: "kb", kilobytes: "kb", kb: "kb",
+  megabyte: "mb", megabytes: "mb", mb: "mb",
+  gigabyte: "gb", gigabytes: "gb", gb: "gb",
+  terabyte: "tb", terabytes: "tb", tb: "tb",
+  // Temperatura (conversão especial)
+  celsius: "c", centigrado: "c", centigrados: "c", grau: "c", graus: "c", c: "c",
+  fahrenheit: "f", f: "f",
+  kelvin: "k", k: "k",
+};
+
+const UNIT_CODES: Record<string, UnitCode> = {
+  m: { kind: "length", factor: 1 },
+  km: { kind: "length", factor: 1000 },
+  cm: { kind: "length", factor: 0.01 },
+  mm: { kind: "length", factor: 0.001 },
+  in: { kind: "length", factor: 0.0254 },
+  ft: { kind: "length", factor: 0.3048 },
+  yd: { kind: "length", factor: 0.9144 },
+  mi: { kind: "length", factor: 1609.344 },
+
+  g: { kind: "mass", factor: 0.001 },
+  kg: { kind: "mass", factor: 1 },
+  t: { kind: "mass", factor: 1000 },
+  lb: { kind: "mass", factor: 0.45359237 },
+  oz: { kind: "mass", factor: 0.028349523125 },
+
+  l: { kind: "volume", factor: 1 },
+  ml: { kind: "volume", factor: 0.001 },
+  m3: { kind: "volume", factor: 1000 },
+  cm3: { kind: "volume", factor: 0.001 },
+  gal: { kind: "volume", factor: 3.785411784 },
+
+  kmh: { kind: "speed", factor: 1000 / 3600 },
+  ms: { kind: "speed", factor: 1 },
+  mph: { kind: "speed", factor: 0.44704 },
+
+  s: { kind: "time", factor: 1 },
+  min: { kind: "time", factor: 60 },
+  h: { kind: "time", factor: 3600 },
+  d: { kind: "time", factor: 86400 },
+  sem: { kind: "time", factor: 604800 },
+
+  b: { kind: "data", factor: 1 },
+  kb: { kind: "data", factor: 1024 },
+  mb: { kind: "data", factor: 1024 ** 2 },
+  gb: { kind: "data", factor: 1024 ** 3 },
+  tb: { kind: "data", factor: 1024 ** 4 },
+};
+
+const KIND_NAMES: Record<UnitKind, string> = {
+  length: "comprimento",
+  mass: "massa",
+  volume: "volume",
+  speed: "velocidade",
+  time: "tempo",
+  data: "dados",
+  temp: "temperatura",
+};
+
+function resolveUnit(raw: string): string | null {
+  const key = norm(raw).replace(/\s+/g, " ");
+  if (UNIT_ALIASES[key]) return UNIT_ALIASES[key];
+  if (UNIT_ALIASES[key.replace(/s$/, "")]) return UNIT_ALIASES[key.replace(/s$/, "")];
+  // Frases compostas: "graus fahrenheit", "quilometros por hora", "metro cubico"...
+  const words = key.split(/\s+/);
+  if (words.length > 1) {
+    // Palavra da unidade quase sempre vem por último ("graus fahrenheit" → fahrenheit)
+    for (let i = words.length; i >= 1; i--) {
+      const w = words[i - 1];
+      const r = resolveUnit(w);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+/** Verdadeiro se o texto parecer uma unidade conhecida. */
+export function isUnitWord(raw: string): boolean {
+  return resolveUnit(raw) !== null;
+}
+
+const c2k = (x: number) => x + 273.15;
+const k2c = (x: number) => x - 273.15;
+const c2f = (x: number) => (x * 9) / 5 + 32;
+const f2c = (x: number) => ((x - 32) * 5) / 9;
+const k2f = (x: number) => c2f(k2c(x));
+const f2k = (x: number) => c2k(f2c(x));
+
+const TEMP_TABLE: Record<string, Record<string, (x: number) => number>> = {
+  c: { c: (x) => x, f: c2f, k: c2k },
+  f: { c: f2c, f: (x) => x, k: f2k },
+  k: { c: k2c, f: k2f, k: (x) => x },
+};
+
+/** Converte um valor entre unidades. Retorna null se algo não for reconhecido. */
+export function convertUnit(
+  valor: number,
+  de: string,
+  para: string,
+): { result: number; unidade: string } | null {
+  if (!Number.isFinite(valor)) return null;
+  const a = resolveUnit(de);
+  const b = resolveUnit(para);
+  if (!a || !b) return null;
+
+  if (a === b) return { result: valor, unidade: b };
+
+  const tempFn = TEMP_TABLE[a]?.[b];
+  if (tempFn) return { result: tempFn(valor), unidade: b };
+
+  const da = UNIT_CODES[a];
+  const db = UNIT_CODES[b];
+  if (!da || !db || da.kind !== db.kind) return null;
+  return { result: (valor * da.factor) / db.factor, unidade: b };
+}
+
+/** Nome amigável da categoria de uma unidade (para mensagens de erro). */
+export function unitKindLabel(raw: string): string | null {
+  const code = resolveUnit(raw);
+  if (!code) return null;
+  return KIND_NAMES[UNIT_CODES[code]?.kind ?? "temp"];
+}
