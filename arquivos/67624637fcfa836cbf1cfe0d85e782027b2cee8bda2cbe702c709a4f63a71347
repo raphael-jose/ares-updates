@@ -1,0 +1,153 @@
+import crypto from "crypto";
+import type { LogEntry, ToolCall } from "./types";
+import { describeLogText, executeTool } from "./tools";
+import { isTechnicalError, registrarFalha } from "./erros";
+
+export interface RoutineStepExec {
+  label: string;
+  call: ToolCall;
+}
+
+function nowTime(): string {
+  return new Date().toLocaleTimeString("pt-BR", { hour12: false });
+}
+
+let logSeq = 0;
+
+interface PendingEntry {
+  call: ToolCall;
+  expires: number;
+}
+
+interface PendingRoutine {
+  steps: RoutineStepExec[];
+  expires: number;
+}
+
+// Apagar (delete_path) e enviar mensagem no WhatsApp exigem confirmação por voz;
+// todo o resto tem autoridade total.
+const CONFIRM_TOOLS: ReadonlySet<ToolCall["tool"]> = new Set(["delete_path", "send_whatsapp"]);
+
+const pending = new Map<string, PendingEntry>();
+const pendingRoutines = new Map<string, PendingRoutine>();
+const TTL_MS = 120000;
+
+function makeLog(call: ToolCall, ok: boolean, message: string): LogEntry {
+  return {
+    id: Date.now() * 100 + (++logSeq % 100),
+    time: nowTime(),
+    tool: call.tool,
+    text: describeLogText(call, ok, message),
+    ok,
+  };
+}
+
+/** Descreve a ação pendente para a pergunta de confirmação por voz. */
+function describeAction(call: ToolCall): string {
+  if (call.tool === "send_whatsapp") {
+    const target = call.args.contato ?? call.args.numero ?? "o contato";
+    const msg = (call.args.mensagem ?? call.args.texto ?? call.args.msg ?? "Oi!").trim();
+    return `enviar no WhatsApp para ${target} a mensagem: "${msg}"`;
+  }
+  const target = call.args.path ?? call.args.caminho ?? call.args.pasta ?? call.args.local ?? "";
+  return `apagar permanentemente ${target}`;
+}
+
+/** Guarda uma ação de apagar aguardando confirmação por voz. */
+function queueConfirmation(call: ToolCall): { token: string; action: string } {
+  const token = crypto.randomBytes(16).toString("hex");
+  pending.set(token, { call, expires: Date.now() + TTL_MS });
+  return { token, action: describeAction(call) };
+}
+
+/** Executa a ação de apagar já confirmada pelo usuário. */
+export async function confirmPendingAsync(token: string): Promise<{ reply: string; log?: LogEntry }> {
+  const entry = pending.get(token);
+  pending.delete(token);
+  if (!entry) return { reply: "Não tenho nenhuma ação pendente de confirmação." };
+  if (Date.now() > entry.expires) return { reply: "A confirmação expirou. Peça novamente." };
+  const { ok, message } = await executeTool(entry.call);
+  return { reply: replyForResult(entry.call, ok, message), log: makeLog(entry.call, ok, message) };
+}
+
+/** Guarda uma rotina (sequência de passos) aguardando confirmação por voz. */
+export function queueRoutine(
+  steps: RoutineStepExec[],
+  action: string,
+): { token: string; action: string } {
+  // Poda entradas expiradas (o Map só é lido no confirm; sem isso vazaria)
+  const now = Date.now();
+  for (const [k, v] of pendingRoutines) {
+    if (v.expires < now) pendingRoutines.delete(k);
+  }
+  const token = `rot-${crypto.randomBytes(16).toString("hex")}`;
+  pendingRoutines.set(token, { steps, expires: now + TTL_MS });
+  return { token, action };
+}
+
+/**
+ * Executa a rotina já confirmada pelo usuário: roda TODOS os passos em
+ * sequência e devolve uma resposta por passo + um log por passo.
+ */
+export async function confirmRoutineAsync(
+  token: string,
+): Promise<{ reply: string; logs?: LogEntry[] }> {
+  const entry = pendingRoutines.get(token);
+  pendingRoutines.delete(token);
+  if (!entry) return { reply: "Não tenho nenhuma rotina pendente de confirmação." };
+  if (Date.now() > entry.expires) return { reply: "A confirmação expirou. Peça novamente." };
+  const replies: string[] = [];
+  const logs: LogEntry[] = [];
+  let okCount = 0;
+  for (const step of entry.steps) {
+    const { ok, message } = await executeTool(step.call);
+    logs.push(makeLog(step.call, ok, message));
+    if (ok) {
+      okCount += 1;
+      replies.push(`${step.label}: ${message}`);
+    } else {
+      // Passo falho (ex.: app não estava aberto) não entra na fala para não
+      // virar um mural de erros; o log do HUD mostra o que aconteceu.
+      replies.push(`${step.label} (não executado)`);
+    }
+  }
+  const total = entry.steps.length;
+  const resumo =
+    okCount === total
+      ? `Rotina concluída: ${total} ${total === 1 ? "passo" : "passos"} executados.`
+      : `Rotina concluída: ${okCount} de ${total} passos.`;
+  return { reply: `${resumo} ${replies.join(" · ")}`.trim(), logs };
+}
+
+/** Processa uma chamada de ferramenta. Só apagar pede confirmação; o resto executa na hora. */
+export async function handleTool(
+  call: ToolCall,
+): Promise<{ reply: string; log?: LogEntry; confirmation?: { token: string; action: string } }> {
+  if (CONFIRM_TOOLS.has(call.tool)) {
+    // Poda entradas expiradas do Map de confirmações (evita acúmulo em sessões longas)
+    const now = Date.now();
+    for (const [k, v] of pending) {
+      if (v.expires < now) pending.delete(k);
+    }
+    const confirmation = queueConfirmation(call);
+    return { reply: `Posso ${confirmation.action}? Diga sim para confirmar.`, confirmation };
+  }
+  const { ok, message } = await executeTool(call);
+  return { reply: replyForResult(call, ok, message), log: makeLog(call, ok, message) };
+}
+
+/**
+ * Fala limpa do resultado de uma ferramenta: quando a tarefa NÃO pode ser
+ * executada com erro técnico, o ARES não lê o erro — registra na tabela de
+ * ações (ver erros.ts) e fala apenas "no momento não posso realizar essa
+ * tarefa". Mensagens amigáveis (ex.: "não encontrei esse arquivo") seguem
+ * normais; só erros técnicos (exceção, caminho, código) são mascarados.
+ */
+function replyForResult(call: ToolCall, ok: boolean, message: string): string {
+  if (ok) return message;
+  // Toda falha de ação entra na tabela do Registro de Ações (para análise).
+  registrarFalha(call.tool, message);
+  // Só erros técnicos são mascarados na fala; mensagens amigáveis seguem normais.
+  if (isTechnicalError(message)) return "No momento não posso realizar essa tarefa.";
+  return message;
+}
