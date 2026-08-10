@@ -1,9 +1,10 @@
 {
-  "versao": "20260810-165146",
+  "versao": "20260810-170858",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: presenca fresca ao abrir o chat - re-assina os contatos (o broker re-entrega o estado retido) e publica a propria presenca de novo, corrigindo status travado em offline quando a outra maquina reinicia."
+    "Chat P2P: confirmação de recepção (✓ entregue / ✓✓ visto) — cada mensagem enviada mostra se o destinatário recebeu e viu, com ACK automático",
+    "Chat P2P: correção na entrega de mídias grandes (imagem/vídeo/áudio fragmentados agora são decifrados corretamente)"
   ],
   "arquivos": [
     {
@@ -108,8 +109,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/6d07eaef2d9f8af3cb342b9ccb5f00694a9617b6e930db9410d8eed0f6c5e095",
-      "sha256": "6d07eaef2d9f8af3cb342b9ccb5f00694a9617b6e930db9410d8eed0f6c5e095"
+      "url": "arquivos/15044a3c8bb0686e93612f785439b8d67166a66c55c37d71ced4e5871ac92333",
+      "sha256": "15044a3c8bb0686e93612f785439b8d67166a66c55c37d71ced4e5871ac92333"
     },
     {
       "caminho": "app/icon.svg",
@@ -138,8 +139,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/4cd76b3c4d5adb35d2b321da32716f10ab5f90c2ce8bca0309e72a92b5a7a6fc",
-      "sha256": "4cd76b3c4d5adb35d2b321da32716f10ab5f90c2ce8bca0309e72a92b5a7a6fc"
+      "url": "arquivos/09b524ffd79d36f465827cbabcd3e557617fe123c309cfae79d14d8a9f2a98fa",
+      "sha256": "09b524ffd79d36f465827cbabcd3e557617fe123c309cfae79d14d8a9f2a98fa"
     },
     {
       "caminho": "instrumentation.ts",
@@ -228,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/14aa614c83bd6e354e6a1f689ecf2c1aec5b6679113cd1dad10ef5a2ea710de2",
-      "sha256": "14aa614c83bd6e354e6a1f689ecf2c1aec5b6679113cd1dad10ef5a2ea710de2"
+      "url": "arquivos/f239801dfebee9116cdbfd3a9c3a09f21eab70101f21cb6d18f75845c25e2a08",
+      "sha256": "f239801dfebee9116cdbfd3a9c3a09f21eab70101f21cb6d18f75845c25e2a08"
     },
     {
       "caminho": "lib/agent/project.ts",
