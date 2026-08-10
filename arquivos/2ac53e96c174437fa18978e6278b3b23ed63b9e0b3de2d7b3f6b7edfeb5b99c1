@@ -1,0 +1,24 @@
+import { NextRequest, NextResponse } from "next/server";
+import { processCommand } from "@/lib/agent";
+
+export const runtime = "nodejs";
+
+export async function POST(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as { text?: unknown; humor?: unknown };
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  const humor = typeof body.humor === "string" ? body.humor.trim().slice(0, 400) : undefined;
+  if (!text) {
+    return NextResponse.json({ reply: "Não recebi nenhum comando." }, { status: 400 });
+  }
+  try {
+    const result = await processCommand(text, humor);
+    return NextResponse.json(result);
+  } catch (err) {
+    return NextResponse.json(
+      {
+        reply: `Erro interno: ${err instanceof Error ? err.message : String(err)}`,
+      },
+      { status: 500 },
+    );
+  }
+}
