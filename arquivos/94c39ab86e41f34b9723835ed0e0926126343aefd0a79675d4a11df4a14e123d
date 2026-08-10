@@ -1,0 +1,516 @@
+export interface VoiceListenerCallbacks {
+  onListening?(listening: boolean): void;
+  onInterim?(text: string): void;
+  onFinal?(text: string): void;
+  onError?(): void;
+  /** Usuário começou a falar (barge-in): permite cortar a fala do ARES na hora. */
+  onSpeechStart?(): void;
+}
+
+export interface VoiceListener {
+  start(): void;
+  stop(): void;
+  isListening(): boolean;
+}
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>>; resultIndex: number }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+};
+
+function getSpeechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as Record<string, unknown>;
+  return (w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null) as (new () => SpeechRecognitionLike) | null;
+}
+
+export function createVoiceListener(callbacks: VoiceListenerCallbacks): VoiceListener {
+  const Ctor = getSpeechRecognitionCtor();
+  let recognition: SpeechRecognitionLike | null = null;
+  let listening = false;
+  let manualStop = false;
+  let finalBuffer = "";
+
+  // ——— Barge-in: detecta o início de fala do usuário (debounced) ———
+  // Só dispara depois de ~200ms de fala contínua (evita cortar por ruído curto)
+  // e no máximo uma vez por frase (reset após ~2s de silêncio ou no onend).
+  let bargeNotified = false;
+  let bargeTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastResultAt = 0;
+
+  function clearBargeTimer() {
+    if (bargeTimer) {
+      clearTimeout(bargeTimer);
+      bargeTimer = null;
+    }
+  }
+
+  function armBarge() {
+    lastResultAt = Date.now();
+    if (bargeNotified || bargeTimer) return;
+    bargeTimer = setTimeout(() => {
+      bargeTimer = null;
+      if (!bargeNotified && Date.now() - lastResultAt < 400) {
+        bargeNotified = true;
+        callbacks.onSpeechStart?.();
+      }
+    }, 200);
+  }
+
+  function fireListening(v: boolean) {
+    if (listening === v) return;
+    listening = v;
+    callbacks.onListening?.(v);
+  }
+
+  function start() {
+    if (!Ctor) {
+      callbacks.onError?.();
+      return;
+    }
+    if (listening) return;
+    manualStop = false;
+    const rec = new Ctor();
+    recognition = rec;
+    rec.lang = "pt-BR";
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        const transcript = result[0]?.transcript ?? "";
+        if ((result as unknown as { isFinal: boolean }).isFinal) {
+          finalBuffer += transcript + " ";
+        } else {
+          interim += transcript;
+        }
+      }
+      if (interim.trim()) callbacks.onInterim?.(interim.trim());
+      const finalText = finalBuffer.trim();
+      if (interim.trim() || finalText) {
+        // Nova frase depois de um silêncio: permite disparar o barge de novo
+        if (Date.now() - lastResultAt > 2000) bargeNotified = false;
+        armBarge();
+      }
+      if (finalText) {
+        callbacks.onFinal?.(finalText);
+        finalBuffer = "";
+      }
+    };
+
+    rec.onend = () => {
+      fireListening(false);
+      clearBargeTimer();
+      bargeNotified = false; // nova sessão de reconhecimento: pode bargar de novo
+      if (!manualStop && Ctor) {
+        try {
+          rec.start();
+        } catch {
+          /* already running */
+        }
+      }
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        manualStop = true;
+        fireListening(false);
+        callbacks.onError?.();
+      }
+    };
+
+    try {
+      rec.start();
+      fireListening(true);
+    } catch {
+      callbacks.onError?.();
+    }
+  }
+
+  function stop() {
+    manualStop = true;
+    finalBuffer = "";
+    clearBargeTimer();
+    bargeNotified = false;
+    if (recognition) {
+      try {
+        recognition.abort();
+      } catch {
+        /* noop */
+      }
+    }
+    fireListening(false);
+  }
+
+  return {
+    start,
+    stop,
+    isListening: () => listening,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+// REPRODUÇÃO DE VOZ: voz neural natural gerada no servidor (edge-tts)
+// com fallback para o speechSynthesis do navegador caso o servidor
+// esteja sem internet/Python.
+// ────────────────────────────────────────────────────────────────
+
+// Estado global de fala: permite cortar ("sem som") e silenciar o ARES.
+let speechBlocked = false;
+let activeAudio: HTMLAudioElement | null = null;
+let activeAudioUrl: string | null = null;
+let speechResolve: (() => void) | null = null;
+
+// Anti-sobreposição de vozes: cada nova chamada a speak() corta a fala em
+// andamento (a última chamada vence). O "epoch" descarta fetches antigos que
+// ainda não terminaram quando outra fala assumiu — assim o monitor de saúde,
+// mensagens e respostas do ARES nunca falam dois ao mesmo tempo.
+let speechEpoch = 0;
+
+// Preferências de voz: velocidade (rate), tom (pitch) e voz (feminina/masculina/nome).
+export interface VoiceSettings {
+  /** Velocidade: 1 = normal (0.5..2). */
+  rate: number;
+  /** Tom em semitons-ish (Hz offset): -20..20; 0 = normal. */
+  pitch: number;
+  /** Voz: "feminina" | "masculina" | nome de voz edge-tts (ex.: pt-BR-ThalitaNeural). */
+  voice: string;
+}
+
+// Padrão: voz FEMININA com tom levemente mais grave (-4 Hz) — inspirada na
+// dublagem brasileira da Viúva Negra (Fernanda Baronne): firme, natural e
+// com presença, sem soar robótica. Ajustável no painel VOZ do HUD.
+const DEFAULT_VOICE_SETTINGS: VoiceSettings = { rate: 1, pitch: -4, voice: "feminina" };
+let voiceSettings: VoiceSettings = { ...DEFAULT_VOICE_SETTINGS };
+
+/** Define as preferências de voz (rate/pitch/voz) usadas na próxima fala. */
+export function setVoiceSettings(next: Partial<VoiceSettings>): void {
+  voiceSettings = { ...voiceSettings, ...next };
+}
+
+export function getVoiceSettings(): VoiceSettings {
+  return { ...voiceSettings };
+}
+
+function setSpeechResolve(r: (() => void) | null): void {
+  speechResolve = r;
+}
+
+/**
+ * Limpa o texto para ser falado: remove URLs por completo (o ARES não deve
+ * ler endereços), remove artefatos de instrução do modelo ("speak(...)",
+ * "say:", "speak \"…\"") e símbolos de formatação (***, #, _, `…) que a voz
+ * leria literalmente. Expande unidades/símbolos para fala natural ("21°C"
+ * vira "21 graus Celsius", "km/h" vira "quilômetros por hora").
+ */
+export function sanitizeForSpeech(raw: string): string {
+  let s = (raw ?? "").trim();
+  if (!s) return s;
+
+  // URLs (http(s):// e www.) NÃO são lidas: removidas por completo
+  s = s.replace(/\bhttps?:\/\/[^\s)"']+/gi, " ");
+  s = s.replace(/\bwww\.[^\s)"']+/gi, " ");
+  // [texto](url) → texto
+  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  // Parênteses que sobraram de URLs removidas ("veja (https://x.com) agora")
+  s = s.replace(/\(\s*\)/g, " ");
+
+  // Artefatos de instrução do modelo — nunca lidos: "speak(...)", "say(...)",
+  // "Speak:", "speak \"texto\"", "lang: pt", "lang(...)". Se houver texto
+  // citado, ele é preservado.
+  s = s
+    .replace(/\b(?:speak|say)(?:ing|s)?\s*\(["'“”‘’]([^)"'“”‘’]+)["'“”‘’]\)/gi, " $1 ")
+    .replace(/\b(?:speak|say)(?:ing|s)?\s*\([^)]*\)/gi, " ")
+    .replace(/\b(?:speak|say)(?:ing|s)?\s*:\s*/gi, " ")
+    .replace(/\b(?:speak|say)(?:ing|s)?\s+["“]([^"”]+)["”]/gi, " $1 ")
+    .replace(/\b(?:speak|say)(?:ing|s)?\s+['‘]([^'’]+)['’]/gi, " $1 ")
+    // "lang"/"language" do modelo (ex.: "lang: pt-BR", "language: pt") nunca são lidas
+    .replace(/\b(?:xml:)?(?:lang|language|locale)\s*(?::|\s*=)\s*["']?[a-z]{2}(?:-[A-Z]{2})?["']?/gi, " ")
+    .replace(/\b(?:lang|language)\s*\([^)]*\)/gi, " ")
+    // Tags que escaparem para o texto nunca são lidas (</speak>, <xml>, …)
+    .replace(/<[^>]+>/g, " ")
+// Termo tojo colado em palavra ("Chrome.speak", "app.xml", "script_said")
+    .replace(/[._-]\s*(?:speak|speaks|speaking|say|says|said|xml|ssml|lang)\b/gi, " ")
+    // Palavras sozinhas do modelo que não deveriam existir na fala: "speak",
+    // "say", "xml", "ssml", "lang", "ui" (e variações coladas como "xmllang",
+    // "speaks", "says", "said")
+    .replace(/\b(?:speak|speaks|speaking|say|says|said|xml|ssml|xmllang|lang|ui)\b/gi, " ")
+    // Sobras de dois pontos de termos removidos ("xml:" → ":") — só quando
+    // soltos no começo de palavra, para não tocar horários (12:30)
+    .replace(/(?:^|\s)[:：]+(?=\s|$)/g, " ")
+    // Letras soltas que sobraram de termos removidos ("janela do s Chrome",
+    // "... do s Chrome") — removidas só quando a próxima palavra começa com
+    // maiúscula (nunca toca frases normais em minúsculas)
+    .replace(/[\s(·](?:s|u|x|v|k)(?=\s+[A-ZÀ-Ú][\wÀ-ú-]*)/g, " ");
+
+  // Diretórios e caminhos nunca são lidos: nem do Windows ("C:\Users\…",
+  // "C:/pasta"), nem unix ("/home/user"), nem caminhos relativos ("./src")
+  s = s
+    .replace(/\b[A-Za-z]:[\\/][^\s"'<>)]+/g, " ")
+    .replace(/~(?:[\\/][^\s"'<>)]+)+/g, " ")
+    .replace(/\.{1,2}[\\/][^\s"'<>)]+/g, " ")
+    .replace(/(?:\/[A-Za-z0-9_.-]+){2,}[\\/]/g, " ")
+    .replace(/\b[\wÀ-ÿ.-]+\.(?:tsx?|jsx?|mjs?|cjs|py|json|md|css|html?|txt|log|pptx?|docx?|xlsx?|wav|mp3|onnx|svg|png|jpe?g|webp|pdf|bat|cmd|ps1|sh|sql|db|lock|env|gitignore)\b/gi, " ");
+
+  // Blocos de código (```...``` e `...`) nunca são lidos como texto corrido
+  s = s.replace(/```[^`]*```/gs, " ").replace(/`([^`]+)`/g, " $1 ");
+
+  // ——— Unidades e símbolos: fala natural, sem ler literalmente ———
+  // Temperatura: "21°C" → "21 graus Celsius"; "13°" → "13 graus"
+  s = s
+    .replace(/(\d+(?:[.,]\d+)?)\s*[°º]\s*[cC](?:\b|$)/g, "$1 graus Celsius")
+    .replace(/(\d+(?:[.,]\d+)?)\s*[°º]\s*[fF](?:\b|$)/g, "$1 graus Fahrenheit")
+    .replace(/(\d+(?:[.,]\d+)?)\s*[°º]/g, "$1 graus")
+    .replace(/[°º]\s*[cC](?:\b|$)/g, "graus Celsius")
+    .replace(/[°º]\s*[fF](?:\b|$)/g, "graus Fahrenheit")
+    .replace(/[°º]/g, " graus ")
+    // Unidades comuns. Obs.: o \b do JS não trata acentos como letra ("Mín"
+    // viraria "metrosín"), então as abreviaturas simples só expandem quando
+    // vêm depois de um número; e ²/³ não são \w, então sem \b depois deles.
+    .replace(/\bkm\/h\b/gi, "quilômetros por hora")
+    .replace(/\bkm\/s\b/gi, "quilômetros por segundo")
+    .replace(/\bm\/s\b/gi, "metros por segundo")
+    .replace(/\bkm²|\bkm2\b/gi, "quilômetros quadrados")
+    .replace(/\bcm²|\bcm2\b/gi, "centímetros quadrados")
+    .replace(/\bm²|\bm2\b/gi, "metros quadrados")
+    .replace(/\bkm³|\bkm3\b/gi, "quilômetros cúbicos")
+    .replace(/\bm³|\bm3\b/gi, "metros cúbicos")
+    .replace(/(\d[\d.,]*)\s*km\b/gi, "$1 quilômetros")
+    .replace(/(\d[\d.,]*)\s*cm\b/gi, "$1 centímetros")
+    .replace(/(\d[\d.,]*)\s*mm\b/gi, "$1 milímetros")
+    .replace(/(\d[\d.,]*)\s*min\b/gi, "$1 minutos")
+    .replace(/(\d[\d.,]*)\s*kg\b/gi, "$1 quilogramas")
+    .replace(/(\d[\d.,]*)\s*m\b/gi, "$1 metros")
+    .replace(/(\d[\d.,]*)\s*g\b/gi, "$1 gramas")
+    .replace(/(\d[\d.,]*)\s*l\b/gi, "$1 litros")
+    .replace(/(\d[\d.,]*)\s*ml\b/gi, "$1 mililitros")
+    .replace(/(\d[\d.,]*)\s*hab\.?\b/gi, "$1 habitantes")
+    // Moedas e percentual
+    .replace(/\bUS\$\s*/g, "dólares ")
+    .replace(/\bU\$\s*/g, "dólares ")
+    .replace(/R\$\s*/g, "reais ")
+    .replace(/€\s*/g, "euros ")
+    .replace(/\bUSD\b/gi, "dólares")
+    .replace(/\bBRL\b/gi, "reais")
+    .replace(/\bEUR\b/gi, "euros")
+    .replace(/(\d+(?:[.,]\d+)?)\s*%/g, "$1 por cento")
+    .replace(/%/g, " por cento")
+    // Símbolos
+    .replace(/\+(\d)/g, "$1") // telefone: +55 → 55
+    .replace(/(\d)\s*[xX×]\s*(\d)/g, "$1 por $2") // 1920x1080 → 1920 por 1080
+    .replace(/(\d)\s*\*\s*(\d)/g, "$1 vezes $2")
+    .replace(/(\d)\s+-\s+(\d)/g, "$1 menos $2") // só com espaço: não estraga datas (05-08) nem faixas (10-15)
+    .replace(/(\w)\s*=\s*(\w)/g, "$1 igual a $2")
+    .replace(/@/g, " arroba ")
+    .replace(/#(\d+)/g, " número $1");
+
+  // Símbolos de markdown que a voz leria (asteriscos, #, _, ~, `, |, >)
+  s = s.replace(/[#*_~`|>]/g, " ");
+  s = s.replace(/\s{2,}/g, " ").trim();
+  // IMPORTANTE: NUNCA devolver o `raw` quando a limpeza zera o texto — se a
+  // fala era só artefato do modelo ("speak xml lang"), a voz leria o lixo
+  // literalmente. Texto vazio = não fala nada (o chamador já trata).
+  return s;
+}
+
+/** True se o ARES está falando neste momento (áudio do servidor ou voz local). */
+export function isSpeaking(): boolean {
+  return (
+    activeAudio !== null ||
+    speechResolve !== null ||
+    (typeof window !== "undefined" && window.speechSynthesis?.speaking === true)
+  );
+}
+
+/**
+ * Corta imediatamente qualquer fala em andamento (áudio servidor + voz do
+ * navegador). Retorna true se havia algo falando de verdade — usado pelo
+ * barge-in para saber se o usuário interrompeu uma fala real.
+ */
+export function cancelSpeech(): boolean {
+  // Guarda referências antes de resolver a promessa: o resolve zera activeAudio.
+  const audio = activeAudio;
+  const url = activeAudioUrl;
+  const hadActive =
+    audio !== null ||
+    speechResolve !== null ||
+    (typeof window !== "undefined" && window.speechSynthesis?.speaking === true);
+  activeAudio = null;
+  activeAudioUrl = null;
+  if (speechResolve) {
+    const r = speechResolve;
+    speechResolve = null;
+    r();
+  }
+  if (audio) {
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+    } catch {
+      /* noop */
+    }
+  }
+  if (url) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* noop */
+    }
+  }
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* noop */
+    }
+  }
+  return hadActive;
+}
+
+/** Desliga/religa o som do ARES. Ao desligar, corta a fala atual e silencia as próximas. */
+export function setSpeechBlocked(blocked: boolean): void {
+  speechBlocked = blocked;
+  if (blocked) cancelSpeech();
+}
+
+function browserVoiceFallback(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || !window.speechSynthesis || speechBlocked) {
+      resolve();
+      return;
+    }
+    const synth = window.speechSynthesis;
+    synth.cancel();
+
+    const voices = synth.getVoices();
+    let voice: SpeechSynthesisVoice | null = null;
+    const name = (v: SpeechSynthesisVoice) => v.name.toLowerCase();
+    const isMale = (v: SpeechSynthesisVoice) =>
+      [
+        "antonio",
+        "antônio",
+        "davi",
+        "francisco",
+        "paulo",
+        "pedro",
+        "ricardo",
+        "thales",
+        "vitor",
+        "joão",
+        "joao",
+        "lucas",
+        "daniel",
+        "fernando",
+        "gonçalo",
+        "goncalo",
+        "heitor",
+        "diego",
+        "carlos",
+        "rafael",
+        "gustavo",
+        "bruno",
+        "rodrigo",
+        "marcelo",
+        "andré",
+        "andre",
+        "felipe",
+        "miguel",
+        "caio",
+        "thiago",
+      ].some((m) => name(v).includes(m));
+    const isFemale = (v: SpeechSynthesisVoice) =>
+      ["francisca", "thalita", "brenda", "luciana", "yara", "maria", "ana", "raquel", "helena"].some((m) =>
+        name(v).includes(m),
+      );
+    const wantFemale = voiceSettings.voice === "feminina" || !/masculina|masculino/.test(voiceSettings.voice);
+    const ptVoices = voices.filter((v) => v.lang.toLowerCase().startsWith("pt"));
+    if (wantFemale) {
+      voice = ptVoices.find(isFemale) ?? ptVoices[0] ?? null;
+    } else {
+      const male = ptVoices.find(isMale);
+      voice = male ?? ptVoices[0] ?? null;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    if (voice) utterance.voice = voice;
+    utterance.lang = "pt-BR";
+    utterance.pitch = Math.min(2, Math.max(0, 1 + voiceSettings.pitch / 50));
+    utterance.rate = Math.min(2, Math.max(0.5, voiceSettings.rate));
+    utterance.volume = 1;
+
+    const finish = () => {
+      if (speechResolve === finish) setSpeechResolve(null);
+      resolve();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    setSpeechResolve(finish);
+    synth.speak(utterance);
+  });
+}
+
+/** Fala texto com a voz neural natural gerada no servidor (edge-tts). */
+export async function speak(text: string): Promise<void> {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  if (speechBlocked) return;
+  const clean = sanitizeForSpeech(text);
+  if (!clean) return;
+  // Última fala vence: corta qualquer áudio em andamento antes de começar.
+  const epoch = ++speechEpoch;
+  cancelSpeech();
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    const params = new URLSearchParams({ text: clean.slice(0, 1100) });
+    if (voiceSettings.rate !== 1) params.set("rate", String(voiceSettings.rate));
+    if (voiceSettings.pitch !== 0) params.set("pitch", String(voiceSettings.pitch));
+    if (voiceSettings.voice && voiceSettings.voice !== "masculina") {
+      params.set("voice", voiceSettings.voice);
+    }
+    const res = await fetch(`/api/tts?${params.toString()}`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error("tts falhou");
+    const blob = await res.blob();
+    // Outra chamada assumiu enquanto baixávamos: não toca (nunca 2 vozes).
+    if (epoch !== speechEpoch) return;
+
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (speechResolve === finish) setSpeechResolve(null);
+        activeAudio = null;
+        activeAudioUrl = null;
+        resolve();
+      };
+      audio.onended = finish;
+      audio.onerror = finish;
+      activeAudio = audio;
+      activeAudioUrl = url;
+      setSpeechResolve(finish);
+      if (speechBlocked || epoch !== speechEpoch) {
+        cancelSpeech();
+        return;
+      }
+      audio.play().catch(finish);
+    });
+    URL.revokeObjectURL(url);
+  } catch {
+    // Sem áudio: o ARES fica mudo em vez de trocar para a voz padrão do
+    // navegador (robótica) — uma única voz no projeto todo.
+  }
+}
