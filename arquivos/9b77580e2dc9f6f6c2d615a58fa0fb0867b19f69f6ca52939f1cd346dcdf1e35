@@ -1,0 +1,3047 @@
+import fs from "fs/promises";
+import path from "path";
+import os from "os";
+import crypto from "crypto";
+import { exec } from "child_process";
+import { promisify } from "util";
+import type { ToolCall, ToolName } from "./types";
+import {
+  addAgenda,
+  addTask,
+  agendaListMessage,
+  findContactSync,
+  forget,
+  listAgenda,
+  listTasks,
+  remember,
+  removeAgenda,
+  removeTask,
+} from "./memory";
+import { convertUnit, isUnitWord, unitKindLabel } from "./units";
+import {
+  addTransacao,
+  financeSummary,
+  formatTransacao,
+  formatValor,
+  listTransacoes,
+  removeTransacao,
+  type TransacaoTipo,
+} from "./finance";
+import { wikimediaSearch } from "./wikimedia";
+import { resolveProjectPath } from "./project";
+import { cachedTool } from "./hermes";
+import { askVision } from "./vision";
+// Teclas do SendKeys vivem num módulo folha (keys.ts) — o builtin de voz
+// importa de lá sem puxar o tools.ts inteiro (fs/os) para o bundle do cliente.
+import { isSimpleAscii, parseSpecialKey, sendKeysEscape } from "./keys";
+import { ensureWhatsappServer, waChats, waMessages, waSend, waStatus } from "./whatsapp";
+// Re-export para compatibilidade com os testes (test-vision.ts).
+export { parseSpecialKey, sendKeysEscape };
+
+const execAsync = promisify(exec);
+const EXEC_TIMEOUT = 60000;
+
+const HOME = os.homedir();
+
+const PLACE_ALIASES: Record<string, string> = {
+  "~": HOME,
+  "casa": HOME,
+  "home": HOME,
+  "area de trabalho": path.join(HOME, "Desktop"),
+  "area de trabalho\\": path.join(HOME, "Desktop"),
+  "desktop": path.join(HOME, "Desktop"),
+  "documentos": path.join(HOME, "Documents"),
+  "documentos\\": path.join(HOME, "Documents"),
+  "downloads": path.join(HOME, "Downloads"),
+  "downloads\\": path.join(HOME, "Downloads"),
+  "imagens": path.join(HOME, "Pictures"),
+  "músicas": path.join(HOME, "Music"),
+  "vídeos": path.join(HOME, "Videos"),
+  "projetos": path.join(HOME, "Projects"),
+};
+
+/** Normaliza um caminho digitado: absoluto é aceito, relativo parte da home. */
+export function resolvePath(raw: string): string {
+  const input = (raw ?? "").trim();
+  if (!input) return HOME;
+  const alias = PLACE_ALIASES[input.toLowerCase()];
+  if (alias) return alias;
+  if (/^[A-Za-z]:[\\/]/.test(input)) return path.normalize(input);
+  if (input.startsWith("~")) return path.join(HOME, input.slice(1));
+  // Autoridade total: caminhos relativos partem da home, mas podem ir a qualquer lugar
+  return path.normalize(path.join(HOME, input));
+}
+
+export async function toolCreateFolder(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const p = resolveProjectPath(args.path ?? args.nome ?? args.local ?? "");
+  await fs.mkdir(p, { recursive: true });
+  return { ok: true, message: `Pasta criada: ${p}` };
+}
+
+export async function toolCreateFile(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const p = resolveProjectPath(args.path ?? args.nome ?? "");
+  const content = args.conteudo ?? args.content ?? "";
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(p, content, "utf8");
+  return { ok: true, message: `Arquivo criado: ${p}` };
+}
+
+export async function toolCreateProject(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const name = (args.nome ?? args.name ?? "meu-projeto").trim();
+  const base = resolveProjectPath(args.em ?? args.local ?? "projetos");
+  const root = path.join(base, name);
+  await fs.mkdir(root, { recursive: true });
+
+  const files = (args.arquivos ?? args.files ?? "README.md,index.html")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const f of files) {
+    const p = path.join(root, f);
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    const ext = path.extname(f).toLowerCase();
+    let content = "";
+    if (f === "README.md") content = `# ${name}\n\nProjeto criado pelo ARES.\n`;
+    else if (ext === ".json" && f === "package.json")
+      content = `{\n  "name": "${name.toLowerCase()}",\n  "version": "1.0.0",\n  "private": true\n}\n`;
+    else if (ext === ".html")
+      content = `<!doctype html>\n<html lang="pt-BR">\n<head><meta charset="utf-8"><title>${name}</title></head>\n<body><h1>${name}</h1></body>\n</html>\n`;
+    await fs.writeFile(p, content, "utf8");
+  }
+
+  return { ok: true, message: `Projeto criado em ${root} com ${files.length} arquivo${files.length === 1 ? "" : "s"}` };
+}
+
+export async function toolListFolder(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const p = resolveProjectPath(args.path ?? args.local ?? args.pasta ?? "");
+  const entries = await fs.readdir(p, { withFileTypes: true });
+  const lines = entries
+    .map((e) => (e.isDirectory() ? `[PASTA] ${e.name}` : `[ARQ] ${e.name}`))
+    .sort()
+    .slice(0, 60);
+  const total = entries.length;
+  return { ok: true, message: `${p} — ${total} itens\n${lines.join("\n")}` };
+}
+
+export async function toolOpenFolder(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const p = resolveProjectPath(args.path ?? args.local ?? args.pasta ?? "");
+  const explorer = os.platform() === "win32" ? process.env.KIWI_CMD ?? "cmd.exe" : "open";
+  await execAsync(
+    os.platform() === "win32"
+      ? `start "" explorer "${p.replace(/"/g, '\\"')}"`
+      : `open "${p}"`,
+    { cwd: HOME, timeout: EXEC_TIMEOUT },
+  );
+  return { ok: true, message: `Abrindo a pasta: ${p}` };
+}
+
+// Pastas comuns do usuário onde um nome simples pode estar (além da própria home)
+const COMMON_USER_DIRS = [
+  HOME,
+  path.join(HOME, "Desktop"),
+  path.join(HOME, "Downloads"),
+  path.join(HOME, "Documents"),
+  path.join(HOME, "Pictures"),
+  path.join(HOME, "Music"),
+  path.join(HOME, "Videos"),
+  path.join(HOME, "Projects"),
+];
+
+// Raízes importantes que nunca devem ser apagadas por engano
+const PROTECTED_DIRS = new Set(COMMON_USER_DIRS.map((d) => d.toLowerCase()));
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function toolDeletePath(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const raw = (args.path ?? args.caminho ?? args.pasta ?? args.local ?? "").trim();
+  if (!raw) return { ok: false, message: "Diga o que deseja apagar: um arquivo ou uma pasta." };
+  const requested = resolveProjectPath(raw);
+
+  // Se o caminho resolvido não existe, procura pelo nome nas pastas comuns —
+  // "apaga notas.txt" normalmente se refere a um arquivo no Downloads/Desktop,
+  // não na raiz da home.
+  let target = requested;
+  if (!(await pathExists(target))) {
+    const base = path.basename(requested);
+    const found: string[] = [];
+    for (const dir of COMMON_USER_DIRS) {
+      const candidate = path.join(dir, base);
+      if (await pathExists(candidate)) found.push(candidate);
+    }
+    if (found.length === 0) {
+      return { ok: false, message: `Não encontrei "${base}". O caminho ${requested} não existe.` };
+    }
+    if (found.length > 1) {
+      return {
+        ok: false,
+        message: `Encontrei ${found.length} itens com o nome "${base}":\n${found.join("\n")}\nDiga o caminho completo para eu apagar o certo.`,
+      };
+    }
+    target = found[0];
+  }
+
+  if (PROTECTED_DIRS.has(target.toLowerCase())) {
+    return { ok: false, message: `Não posso apagar ${target}, é uma pasta importante.` };
+  }
+
+  const stat = await fs.lstat(target).catch(() => null);
+  if (!stat) return { ok: false, message: `${target} não existe.` };
+  try {
+    await fs.rm(target, { recursive: true, force: false });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui apagar ${target}: ${msg}` };
+  }
+  if (await pathExists(target)) {
+    return { ok: false, message: `Não consegui apagar ${target}: o arquivo continua lá.` };
+  }
+  return { ok: true, message: `Apagado: ${target}` };
+}
+
+export async function toolRenamePath(args: Record<string, string>): Promise<{ ok: true; message: string }> {
+  const from = resolveProjectPath(args.origem ?? args.de ?? "");
+  const to = resolveProjectPath(args.destino ?? args.para ?? "");
+  await fs.rename(from, to);
+  return { ok: true, message: `Renomeado para: ${to}` };
+}
+
+/** Lê o conteúdo de um arquivo com números de linha (limitado às primeiras linhas). */
+export async function toolReadFile(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const raw = (args.path ?? args.arquivo ?? args.file ?? "").trim();
+  if (!raw) return { ok: false, message: "Diga qual arquivo devo ler." };
+  const p = resolveProjectPath(raw);
+  try {
+    const content = await fs.readFile(p, "utf8");
+    const lines = content.split(/\r?\n/);
+    // Faixa opcional: linhas="40-80" (ou "5", "40-", "10-5" invertido) mostra só o trecho
+    let start = 1;
+    let end = lines.length;
+    const rangeRaw = (args.linhas ?? args.range ?? "").trim();
+    if (rangeRaw) {
+      const m = rangeRaw.match(/^(\d+)\s*(?:-\s*(\d+)?)?$/);
+      if (m) {
+        const a = Math.max(1, Number(m[1]));
+        const hasEnd = rangeRaw.includes("-") && m[2] !== undefined;
+        const b = hasEnd ? Number(m[2]) : Math.min(lines.length, a + 120 - 1);
+        if (a > b) {
+          // Faixa invertida ("10-5") → mostra 5-10 em vez de nada
+          start = b;
+          end = a;
+        } else {
+          start = a;
+          end = b;
+        }
+      }
+    }
+    const MAX = 120;
+    const shown = lines.slice(start - 1, Math.min(end, start - 1 + MAX));
+    const numbered = shown.map((l, i) => `${String(start + i).padStart(4, " ")} │ ${l}`).join("\n");
+    const total = lines.length;
+    const hidden = Math.max(0, total - (start - 1 + shown.length));
+    const tail = hidden > 0 ? `\n… (${hidden} linha${hidden === 1 ? "" : "s"} não mostradas — use linhas=\"${start + shown.length}-\" para ver mais)` : "";
+    return { ok: true, message: `${p} — ${total} linha${total === 1 ? "" : "s"}\n${numbered}${tail}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui ler ${p}: ${msg}` };
+  }
+}
+
+/**
+ * Edita um arquivo substituindo um trecho EXATO por outro (patch por texto).
+ * Contrato: 'de' deve casar byte a byte com o conteúdo (espaços/acentos contam).
+ */
+export async function toolEditFile(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const raw = (args.path ?? args.arquivo ?? args.file ?? "").trim();
+  const de = args.de ?? args.buscar ?? "";
+  const para = args.para ?? args.substituir ?? "";
+  if (!raw) return { ok: false, message: "Informe o arquivo a editar (path)." };
+  if (!de) return { ok: false, message: "Informe o trecho a substituir (de)." };
+  const p = resolveProjectPath(raw);
+  try {
+    const content = await fs.readFile(p, "utf8");
+    const all = /^(true|sim|todas|todos|1)$/i.test((args.todas ?? args.all ?? "").trim());
+    const idx = content.indexOf(de);
+    if (idx < 0) {
+      // Ajuda o modelo a corrigir: mostra a linha com mais palavras em comum
+      // com o trecho procurado (funciona até para termos curtos).
+      const words = de
+        .trim()
+        .split(/\s+/)
+        .filter((w) => /[a-zA-Z0-9À-ÿ]/.test(w));
+      const li = content.split(/\r?\n/);
+      let best = -1;
+      let bestScore = 0;
+      li.forEach((l, i) => {
+        const score = words.reduce((s, w) => s + (l.includes(w) ? 1 : 0), 0);
+        if (score > bestScore) {
+          bestScore = score;
+          best = i;
+        }
+      });
+      const hint =
+        best >= 0 && bestScore > 0
+          ? ` A linha mais próxima é a ${best + 1}: "${li[best].slice(0, 80)}".`
+          : "";
+      return {
+        ok: false,
+        message: `Não encontrei o trecho exato em ${p}. Confira espaçamento e acentos.${hint}`,
+      };
+    }
+    let next: string;
+    let count = 0;
+    if (all) {
+      next = content.split(de).join(para);
+      count = content.split(de).length - 1;
+    } else {
+      next = content.slice(0, idx) + para + content.slice(idx + de.length);
+      count = 1;
+    }
+    await fs.writeFile(p, next, "utf8");
+    const beforeLines = content.split(/\r?\n/).length;
+    const afterLines = next.split(/\r?\n/).length;
+    return {
+      ok: true,
+      message: `Editei ${p}: ${count} substituiç${count === 1 ? "ão" : "ões"} (antes ${beforeLines} linhas, agora ${afterLines}).`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui editar ${p}: ${msg}` };
+  }
+}
+
+/** Captura um print (screenshot) da tela inteira e salva em PNG, abrindo depois. */
+export async function toolTakeScreenshot(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Captura de tela disponível apenas no Windows." };
+  }
+  const dir = resolvePath(args.salvar ?? args.em ?? args.pasta ?? "imagens");
+  await fs.mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const file = path.join(dir, `print-ares-${stamp}.png`);
+
+  const script = [
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `Add-Type -AssemblyName System.Drawing`,
+    `$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen`,
+    `$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height`,
+    `$gfx = [System.Drawing.Graphics]::FromImage($bmp)`,
+    `$gfx.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bmp.Size)`,
+    `$bmp.Save('${file.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+    `$gfx.Dispose()`,
+    `$bmp.Dispose()`,
+    `Write-Output 'PRINT_OK'`,
+  ].join("\n");
+
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 30000, windowsHide: true },
+    );
+    if (!(stdout ?? "").includes("PRINT_OK")) {
+      return { ok: false, message: "Não consegui capturar a tela." };
+    }
+    await execAsync(`start "" "${file.replace(/"/g, '\\"')}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return { ok: true, message: `Print salvo e aberto: ${file}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui capturar a tela: ${msg}` };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// LEITURA DE TELA (OCR) — screenshot + tesseract.js
+// ═══════════════════════════════════════════════
+interface OcrWord {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+let ocrWorkerPromise: Promise<import("tesseract.js").Worker> | null = null;
+let lastOcr: {
+  words: OcrWord[];
+  boundsX: number;
+  boundsY: number;
+  screenW: number;
+  screenH: number;
+  at: number;
+} | null = null;
+
+async function getOcrWorker(): Promise<import("tesseract.js").Worker> {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      try {
+        const { createWorker } = await import("tesseract.js");
+        // O webpack do Next.js reescreve o __dirname do pacote e o workerPath
+        // padrão vira um caminho inexistente (ex.: C:\ROOT\node_modules\…),
+        // derrubando o processo com MODULE_NOT_FOUND. Resolve o caminho REAL
+        // do worker-script no disco, em runtime, a partir do cwd.
+        let workerPath: string | undefined;
+        try {
+          const p = path.join(
+            process.cwd(),
+            "node_modules",
+            "tesseract.js",
+            "src",
+            "worker-script",
+            "node",
+            "index.js",
+          );
+          await fs.access(p);
+          workerPath = p;
+        } catch {
+          /* usa o default do pacote */
+        }
+        const worker = await createWorker("por", 1, workerPath ? { workerPath } : undefined);
+        return worker;
+      } catch (err) {
+        // Download do langdata pode falhar (offline/primeira vez): libera a
+        // promise para tentar de novo na próxima leitura em vez de travar.
+        ocrWorkerPromise = null;
+        throw err;
+      }
+    })();
+  }
+  return ocrWorkerPromise;
+}
+
+/** Hermes: cria o worker de OCR em background para a primeira leitura de tela ser rápida. */
+export async function warmOcrInBackground(): Promise<boolean> {
+  try {
+    await getOcrWorker();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Captura a tela inteira num PNG temporário e devolve as dimensões da tela virtual. */
+async function captureScreenshotToFile(
+  file: string,
+): Promise<{ boundsX: number; boundsY: number; w: number; h: number }> {
+  const script = [
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `Add-Type -AssemblyName System.Drawing`,
+    `$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen`,
+    `$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height`,
+    `$gfx = [System.Drawing.Graphics]::FromImage($bmp)`,
+    `$gfx.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bmp.Size)`,
+    `$bmp.Save('${file.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+    `$gfx.Dispose()`,
+    `$bmp.Dispose()`,
+    `Write-Output "BOUNDS $($bounds.X) $($bounds.Y) $($bounds.Width) $($bounds.Height)"`,
+  ].join("\n");
+  const { stdout } = await execAsync(
+    `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`,
+    { cwd: HOME, timeout: 30000, windowsHide: true },
+  );
+  const m = (stdout ?? "").match(/BOUNDS (-?\d+) (-?\d+) (\d+) (\d+)/);
+  if (!m) throw new Error("captura da tela falhou");
+  return { boundsX: Number(m[1]), boundsY: Number(m[2]), w: Number(m[3]), h: Number(m[4]) };
+}
+
+/**
+ * OCR NATIVO do Windows (Windows.Media.Ocr) via PowerShell — muito mais rápido
+ * e preciso para texto de interface que o tesseract.js. Devolve null quando o
+ * OCR do Windows não está disponível/falha (o chamador cai no tesseract).
+ */
+async function ocrWindows(file: string): Promise<{ text: string; words: OcrWord[] } | null> {
+  // O Windows.Media.Ocr (StorageFile) NÃO aceita caminho com barras "/" —
+  // exige contrabarras (C:\Users\...\arquivo.png). Normaliza sempre.
+  const fileWin = file.replace(/\//g, "\\");
+  const sep = "\u001F";
+  const script = [
+    `Add-Type -AssemblyName System.Runtime.WindowsRuntime`,
+    `$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]`,
+    `$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]`,
+    `$null = [Windows.Globalization.Language, Windows.Globalization, ContentType=WindowsRuntime]`,
+    `$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType=WindowsRuntime]`,
+    `$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]`,
+    `function Await($op, $t) { $m = $asTask.MakeGenericMethod($t); $task = $m.Invoke($null, @($op)); $task.Wait(-1) | Out-Null; $task.Result }`,
+    `try {`,
+    `  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('${fileWin.replace(/'/g, "''")}')) ([Windows.Storage.StorageFile])`,
+    `  $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])`,
+    `  $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])`,
+    `  $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])`,
+    `  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('pt-BR'))`,
+    `  if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }`,
+    `  if (-not $engine) { Write-Output 'OCR_SEM_ENGINE'; exit 0 }`,
+    `  $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])`,
+    `  $out = @()`,
+    `  foreach ($line in $result.Lines) {`,
+    `    $out += 'L${sep}' + $line.Text`,
+    `    foreach ($w in $line.Words) {`,
+    `      $r = $w.BoundingRect`,
+    `      $out += 'W${sep}' + $w.Text + '${sep}' + [int]$r.X + '${sep}' + [int]$r.Y + '${sep}' + [int]$r.Width + '${sep}' + [int]$r.Height`,
+    `    }`,
+    `  }`,
+    `  Write-Output $out`,
+    `  Write-Output 'OCR_OK'`,
+    `} catch { Write-Output 'OCR_ERRO' }`,
+  ].join("\n");
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 30000, windowsHide: true },
+    );
+    const out = stdout ?? "";
+    if (!out.includes("OCR_OK")) return null;
+    const words: OcrWord[] = [];
+    const linesText: string[] = [];
+    for (const raw of out.split(/\r?\n/)) {
+      const l = raw.trimEnd();
+      if (!l) continue;
+      if (l.startsWith(`L${sep}`)) {
+        linesText.push(l.slice(2));
+      } else if (l.startsWith(`W${sep}`)) {
+        const parts = l.split(sep);
+        const txt = parts[1] ?? "";
+        const w = Number(parts[4] ?? 0);
+        const h = Number(parts[5] ?? 0);
+        if (txt && w > 1 && h > 1) {
+          words.push({ text: txt, x: Number(parts[2] ?? 0), y: Number(parts[3] ?? 0), w, h });
+        }
+      }
+    }
+    const text = linesText.join("\n").trim();
+    if (!text && words.length === 0) return null;
+    return { text, words };
+  } catch {
+    return null;
+  }
+}
+
+/** OCR com tesseract.js (fallback quando o OCR do Windows não está disponível). */
+async function ocrTesseract(file: string): Promise<{ text: string; words: OcrWord[] }> {
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(file);
+  // tesseract.js v7: Page não expõe `words` no topo — percorre a hierarquia
+  // blocks → paragraphs → lines → words para coletar cada palavra com bbox.
+  const words: OcrWord[] = [];
+  for (const block of data.blocks ?? []) {
+    for (const paragraph of block.paragraphs ?? []) {
+      for (const line of paragraph.lines ?? []) {
+        for (const word of line.words ?? []) {
+          const text = (word.text ?? "").trim();
+          if (!text) continue;
+          const w = (word.bbox?.x1 ?? 0) - (word.bbox?.x0 ?? 0);
+          const h = (word.bbox?.y1 ?? 0) - (word.bbox?.y0 ?? 0);
+          if (w <= 1 || h <= 1) continue; // palavra sem área clicável
+          words.push({ text, x: word.bbox?.x0 ?? 0, y: word.bbox?.y0 ?? 0, w, h });
+        }
+      }
+    }
+  }
+  return { text: (data.text ?? "").trim(), words };
+}
+
+/**
+ * Lê o texto visível na tela inteira. Usa o OCR NATIVO do Windows
+ * (Windows.Media.Ocr, rápido e preciso para interface) e cai para o
+ * tesseract.js quando indisponível. Guarda as palavras com posição para o clique.
+ */
+export async function toolScreenRead(
+  _args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Leitura de tela disponível apenas no Windows." };
+  }
+  const tmp = path.join(os.tmpdir(), `ares-ocr-${crypto.randomBytes(4).toString("hex")}.png`);
+  try {
+    const meta = await captureScreenshotToFile(tmp);
+    // 1) Tenta o OCR nativo do Windows (rápido, sem download de modelo)
+    let ocr: { text: string; words: OcrWord[] } | null = null;
+    try {
+      ocr = await ocrWindows(tmp);
+    } catch {
+      ocr = null;
+    }
+    // 2) Fallback: tesseract.js local
+    if (!ocr || (ocr.words.length === 0 && !ocr.text)) {
+      ocr = await ocrTesseract(tmp).catch(() => null);
+    }
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    if (!ocr) {
+      return { ok: false, message: "Não consegui ler a tela (nenhum OCR disponível)." };
+    }
+    if (ocr.words.length > 0) {
+      lastOcr = {
+        words: ocr.words,
+        boundsX: meta.boundsX,
+        boundsY: meta.boundsY,
+        screenW: meta.w,
+        screenH: meta.h,
+        at: Date.now(),
+      };
+    }
+    if (!ocr.text) return { ok: true, message: "Não consegui ler nenhum texto na tela." };
+    return { ok: true, message: ocr.text.slice(0, 900) };
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui ler a tela: ${msg}` };
+  }
+}
+
+/**
+ * Clique por coordenadas absolutas na tela (opcional duplo clique).
+ * Exportado para testes (monta o script PowerShell sem executar).
+ */
+export function buildClickScript(cx: number, cy: number, duplo: boolean): string {
+  const lines = [
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `Add-Type -AssemblyName System.Drawing`,
+    `Add-Type @"`,
+    `using System;`,
+    `using System.Runtime.InteropServices;`,
+    `public class AresMouse {`,
+    `  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);`,
+    `}`,
+    `"@`,
+    `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(cx)}, ${Math.round(cy)})`,
+    `Start-Sleep -Milliseconds 60`,
+    `[AresMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)`,
+    `[AresMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)`,
+  ];
+  if (duplo) {
+    lines.push(`Start-Sleep -Milliseconds 140`);
+    lines.push(`[AresMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)`);
+    lines.push(`[AresMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)`);
+  }
+  lines.push(`Write-Output 'CLICK_OK'`);
+  return lines.join("\n");
+}
+
+/** Executa o script de clique do mouse (coordenada absoluta da tela). */
+async function clickAt(cx: number, cy: number, duplo: boolean): Promise<boolean> {
+  const script = buildClickScript(cx, cy, duplo);
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 15000, windowsHide: true },
+    );
+    return (stdout ?? "").includes("CLICK_OK");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clica em texto/coordenada na tela. Aceita:
+ * - texto: rótulo visível (ex.: 'Enviar', 'botão OK') — captura fresca quando preciso;
+ * - x/y: coordenadas absolutas (ex.: "clica no ponto 500 300");
+ * - duplo: "1"/"sim" para duplo clique (ex.: abrir um ícone do desktop).
+ * Sempre tenta uma leitura FRESCA se não houver cache recente (tempo real).
+ */
+export async function toolScreenClick(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Clique na tela disponível apenas no Windows." };
+  }
+  const duplo = /^(1|true|sim|yes)$/i.test((args.duplo ?? args.duploClique ?? "").trim());
+
+  // Clique por coordenadas absolutas (sem OCR): "clica no ponto 500 300"
+  const rawX = (args.x ?? args.coordX ?? "").trim();
+  const rawY = (args.y ?? args.coordY ?? "").trim();
+  if (rawX && rawY && /^\d{1,5}$/.test(rawX) && /^\d{1,5}$/.test(rawY)) {
+    const ok = await clickAt(Number(rawX), Number(rawY), duplo);
+    if (!ok) return { ok: false, message: "Não consegui clicar na tela." };
+    return { ok: true, message: `Cliquei no ponto ${rawX}, ${rawY} da tela.` };
+  }
+
+  const texto = (args.texto ?? args.text ?? "").trim();
+  if (!texto) return { ok: false, message: "Diga o texto em que devo clicar ou as coordenadas." };
+
+  // Garante leitura RECENTE (cache curto = 3s) — "clicar em tempo real" exige a
+  // tela atual, não uma leitura velha de 15s.
+  if (!lastOcr || Date.now() - lastOcr.at > 3000) {
+    const fresh = await toolScreenRead({});
+    if (!fresh.ok) return fresh;
+  }
+  if (!lastOcr || lastOcr.words.length === 0) {
+    return { ok: false, message: "Não consegui ler nenhum texto na tela para clicar." };
+  }
+
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9 ]/gi, "")
+      .trim();
+  const t = norm(texto);
+  // Tokens do mais específico para o mais genérico: em "clique no botão enviar",
+  // o rótulo do botão é "enviar" (o token mais longo/distintivo), não "botão".
+  const tokens = t
+    .split(/\s+/)
+    .filter((tok) => tok.length > 1)
+    .sort((a, b) => b.length - a.length);
+  const findWord = () =>
+    lastOcr!.words.find((w) => norm(w.text) === t) ??
+    lastOcr!.words.find((w) => {
+      const wt = norm(w.text);
+      return (wt.length > 2 && wt.includes(t)) || (t.length > 2 && t.includes(wt));
+    }) ??
+    // Alvo com várias palavras ("botão enviar"): o rótulo costuma ser o último token
+    lastOcr!.words.find((w) => {
+      const wt = norm(w.text);
+      return tokens.some((tok) => wt === tok || (wt.length > 2 && wt.includes(tok)));
+    });
+  let word = findWord();
+  // Não achou na leitura atual? Rele a tela na hora (tempo real) e tenta de novo
+  if (!word) {
+    const fresh = await toolScreenRead({});
+    if (fresh.ok) word = findWord();
+  }
+  if (!word) {
+    return { ok: false, message: `Não encontrei "${texto}" na tela.` };
+  }
+  const cx = lastOcr.boundsX + word.x + word.w / 2;
+  const cy = lastOcr.boundsY + word.y + word.h / 2;
+  const ok = await clickAt(cx, cy, duplo);
+  if (!ok) return { ok: false, message: "Não consegui clicar na tela." };
+  return { ok: true, message: `Cliquei em "${word.text}" na tela.` };
+}
+
+// ═══════════════════════════════════════════════
+// DIGITAR NA TELA (type_text) — texto e teclas em coordenadas reais
+// ═══════════════════════════════════════════════
+
+/** Monta o script PowerShell de digitação (exportado para testes). */
+export function buildTypeScript(opts: {
+  texto?: string;
+  key?: string;
+  limpar?: boolean;
+}): string {
+  const lines = [
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `$ws = New-Object -ComObject WScript.Shell`,
+  ];
+  if (opts.limpar) {
+    lines.push(`$ws.SendKeys('^a')`);
+    lines.push(`Start-Sleep -Milliseconds 60`);
+    lines.push(`$ws.SendKeys('{DELETE}')`);
+    lines.push(`Start-Sleep -Milliseconds 60`);
+  }
+  const texto = (opts.texto ?? "").trim();
+  if (texto) {
+    if (isSimpleAscii(texto)) {
+      // Texto ASCII puro: SendKeys direto (rápido). Acentos/emojis usam a área
+      // de transferência (Ctrl+V), que respeita Unicode por completo.
+      lines.push(`$ws.SendKeys('${sendKeysEscape(texto).replace(/'/g, "''")}')`);
+    } else {
+      lines.push(`[System.Windows.Forms.Clipboard]::SetText('${texto.replace(/'/g, "''")}')`);
+      lines.push(`Start-Sleep -Milliseconds 80`);
+      lines.push(`$ws.SendKeys('^v')`);
+    }
+    lines.push(`Start-Sleep -Milliseconds 80`);
+  }
+  if (opts.key) {
+    lines.push(`$ws.SendKeys('${opts.key.replace(/'/g, "''")}')`);
+    lines.push(`Start-Sleep -Milliseconds 80`);
+  }
+  lines.push(`Write-Output 'TYPE_OK'`);
+  return lines.join("\n");
+}
+
+/**
+ * Digita texto e/ou tecla na tela (campo focado), com clique opcional em
+ * coordenadas reais para focar. Aceita: texto (com acentos usa clipboard),
+ * key (enter, tab, esc, ctrl+c...), x/y (focar campo), limpar ('1' limpa antes).
+ */
+export async function toolTypeText(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Digitação na tela disponível apenas no Windows." };
+  }
+  const texto = (args.texto ?? args.text ?? "").replace(/\r\n/g, "\n");
+  const keyRaw = (args.key ?? args.tecla ?? "").trim();
+  const limpar = /^(1|true|sim|yes)$/i.test((args.limpar ?? args.clear ?? "").trim());
+  if (!texto.trim() && !keyRaw) {
+    return { ok: false, message: "Diga o que devo digitar: um texto ou uma tecla (ex.: enter, tab, ctrl+c)." };
+  }
+  // Limite de tamanho: texto gigante via SendKeys levaria minutos
+  if (texto.length > 1000) {
+    return { ok: false, message: "O texto é longo demais para digitar de uma vez (máximo 1000 caracteres). Quebre em partes ou diga um trecho menor." };
+  }
+
+  // Tecla válida (se informada) — dá feedback claro para o modelo corrigir
+  let key: string | null = null;
+  if (keyRaw) {
+    key = parseSpecialKey(keyRaw);
+    if (!key) {
+      return {
+        ok: false,
+        message: `Não conheço a tecla "${keyRaw}". Use: enter, tab, esc, backspace, delete, espaço, setas (cima/baixo/esquerda/direita), f1-f12, ctrl+c, ctrl+v, ctrl+a, ctrl+z, alt+tab.`,
+      };
+    }
+  }
+
+  // Clique em coordenadas reais para focar o campo (opcional)
+  const rawX = (args.x ?? "").trim();
+  const rawY = (args.y ?? "").trim();
+  if (rawX && rawY && /^\d{1,5}$/.test(rawX) && /^\d{1,5}$/.test(rawY)) {
+    const okClick = await clickAt(Number(rawX), Number(rawY), false);
+    if (!okClick) return { ok: false, message: "Não consegui clicar no campo para focar." };
+  }
+
+  const script = buildTypeScript({ texto: texto.trim(), key: key ?? undefined, limpar });
+  try {
+    // -STA garante thread STA para a área de transferência (Clipboard)
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -STA -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 15000, windowsHide: true },
+    );
+    if (!(stdout ?? "").includes("TYPE_OK")) {
+      return { ok: false, message: "Não consegui digitar na tela." };
+    }
+    const acoes: string[] = [];
+    if (limpar) acoes.push("limpei o campo");
+    if (texto.trim()) acoes.push(`digitei "${texto.trim().slice(0, 60)}"`);
+    if (key) acoes.push(`apertei ${keyRaw}`);
+    const onde = rawX ? ` no ponto ${rawX}, ${rawY}` : " no campo focado";
+    return { ok: true, message: `${acoes.join(" e ")}${onde}.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui digitar na tela: ${msg}` };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// VISÃO — screen_ask: captura a tela e pergunta a um modelo vision gratuito
+// ═══════════════════════════════════════════════
+
+/**
+ * Captura a tela, envia para um modelo de visão gratuito (se configurado) e
+ * devolve a resposta falada. Sem modelo de visão, cai para o OCR (screen_read).
+ * Ex.: 'descreve a tela', 'o que você vê na tela', 'o que tem aberto na tela?'.
+ */
+export async function toolScreenAsk(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Visão de tela disponível apenas no Windows." };
+  }
+  const pergunta = (args.pergunta ?? args.question ?? "Descreva o que está visível na tela.")
+    .trim()
+    .slice(0, 300);
+  const tmp = path.join(os.tmpdir(), `ares-vision-${crypto.randomBytes(4).toString("hex")}.png`);
+  try {
+    await captureScreenshotToFile(tmp);
+    const b64 = await fs.readFile(tmp, "base64");
+    const resposta = await askVision(pergunta, b64);
+    if (resposta) {
+      return { ok: true, message: resposta.slice(0, 700) };
+    }
+    // Sem modelo de visão configurado: cai para o OCR (funciona sempre) —
+    // reutiliza o screenshot já capturado (não tira outro print).
+    const ocr =
+      (await ocrWindows(tmp).catch(() => null)) ??
+      (await ocrTesseract(tmp).catch(() => null));
+    if (!ocr || !ocr.text) {
+      return { ok: true, message: "Não consegui reconhecer nada na tela (sem modelo de visão e sem OCR)." };
+    }
+    return {
+      ok: true,
+      message: `Não há modelo de visão configurado — li o texto da tela com OCR:\n${ocr.text.slice(0, 700)}`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui analisar a tela: ${msg}` };
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+  }
+}
+
+// ═══════════════════════════════════════════════
+// JANELAS DO WINDOWS — maximizar, minimizar, fechar, alternar
+// ═══════════════════════════════════════════════
+
+/** Nomes de processo do Windows por nome comum de programa. */
+const WINDOW_PROCESS: Record<string, string> = {
+  chrome: "chrome",
+  "google chrome": "chrome",
+  edge: "msedge",
+  firefox: "firefox",
+  word: "winword",
+  excel: "excel",
+  powerpoint: "powerpnt",
+  "power point": "powerpnt",
+  notepad: "notepad",
+  "bloco de notas": "notepad",
+  calculadora: "calc",
+  calc: "calc",
+  vscode: "Code",
+  "visual studio code": "Code",
+  code: "Code",
+  whatsapp: "WhatsApp",
+  discord: "Discord",
+  spotify: "Spotify",
+  telegram: "Telegram",
+  taskmgr: "Taskmgr",
+  "gerenciador de tarefas": "Taskmgr",
+  explorador: "explorer",
+  "explorador de arquivos": "explorer",
+  explorer: "explorer",
+  cmd: "cmd",
+  terminal: "cmd",
+  powershell: "powershell",
+  outlook: "OUTLOOK",
+};
+
+/** Lista as janelas abertas (processo + título) usando PowerShell. */
+export async function toolListWindows(): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Listar janelas disponível apenas no Windows." };
+  }
+  const script = [
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`,
+    `$rows = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } | Select-Object -First 30`,
+    `if (-not $rows) { Write-Output 'SEM_JANELAS'; exit 0 }`,
+    `foreach ($p in $rows) { Write-Output ("JANELA | " + $p.ProcessName + " | " + $p.MainWindowTitle) }`,
+  ].join("\n");
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 15000, windowsHide: true },
+    );
+    const out = (stdout ?? "").trim();
+    if (out.includes("SEM_JANELAS")) {
+      return { ok: true, message: "Nenhuma janela aberta no momento." };
+    }
+    const lines = out
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^JANELA \|\s*/, ""))
+      .filter((l) => l.includes(" | "))
+      .map((l) => {
+        const [proc, ...titulo] = l.split(" | ");
+        return `• ${proc} — ${titulo.join(" | ")}`;
+      });
+    if (lines.length === 0) return { ok: true, message: "Nenhuma janela aberta no momento." };
+    return { ok: true, message: `Janelas abertas (${lines.length}):\n${lines.join("\n")}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui listar as janelas: ${msg}` };
+  }
+}
+
+/**
+ * Controla uma janela do Windows: maximizar, minimizar, restaurar, fechar ou
+ * ativar/alternar (traz para a frente). janela aceita nome comum (ex.: chrome,
+ * word) ou trecho do título da janela.
+ */
+export async function toolWindowControl(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, message: "Controle de janelas disponível apenas no Windows." };
+  }
+  const acao = (args.acao ?? args.a ?? "ativar").toLowerCase().trim();
+  const janela = (args.janela ?? args.programa ?? args.app ?? args.nome ?? "").trim();
+  if (!janela) return { ok: false, message: "Diga qual janela/programa controlar (ex.: chrome, word)." };
+
+  // Resolve o processo: alias conhecido ou trecho do título (ex.: "janela do meu site")
+  const proc = (WINDOW_PROCESS[janela.toLowerCase()] ?? janela).replace(/[\r\n]/g, " ");
+  const verbo =
+    acao.startsWith("max")
+      ? "maximizar"
+      : acao.startsWith("min")
+        ? "minimizar"
+        : acao.startsWith("rest")
+          ? "restaurar"
+          : acao.startsWith("fech")
+            ? "fechar"
+            : "ativar";
+
+  const script = [
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`,
+    `Add-Type @"`,
+    `using System;`,
+    `using System.Runtime.InteropServices;`,
+    `public class AresWin {`,
+    `  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);`,
+    `  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);`,
+    `}`,
+    `"@`,
+    `$target = '*${proc.replace(/'/g, "''")}*'`,
+    `$p = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and ($_.ProcessName -like $target -or $_.MainWindowTitle -like $target) } | Select-Object -First 1`,
+    `if (-not $p) { Write-Output 'NOT_FOUND'; exit 0 }`,
+    `switch ('${verbo}') {`,
+    `  'maximizar' { [AresWin]::ShowWindow($p.MainWindowHandle, 3) }`,
+    `  'minimizar' { [AresWin]::ShowWindow($p.MainWindowHandle, 6) }`,
+    `  'restaurar' { [AresWin]::ShowWindow($p.MainWindowHandle, 9) }`,
+    `  'fechar' { $p.CloseMainWindow() }`,
+    `  default { [AresWin]::ShowWindow($p.MainWindowHandle, 9); [AresWin]::SetForegroundWindow($p.MainWindowHandle) }`,
+    `}`,
+    `Start-Sleep -Milliseconds 200`,
+    `Write-Output 'WINDOW_OK'`,
+  ].join("\n");
+
+  try {
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${psEncodedCommand(script)}`,
+      { cwd: HOME, timeout: 60000, windowsHide: true },
+    );
+    const out = (stdout ?? "").trim();
+    if (out.includes("NOT_FOUND")) {
+      return {
+        ok: false,
+        message: `Não encontrei uma janela de "${janela}" aberta. Use list_windows para ver as janelas abertas.`,
+      };
+    }
+    if (!out.includes("WINDOW_OK")) {
+      return { ok: false, message: "Não consegui controlar a janela." };
+    }
+    const verbs: Record<string, string> = {
+      maximizar: "Maximizei",
+      minimizar: "Minimizei",
+      restaurar: "Restaurei",
+      fechar: "Fechei",
+      ativar: "Ativei/trouxe para a frente",
+    };
+    return { ok: true, message: `${verbs[verbo] ?? "Controlei"} a janela de ${janela}.` };
+  } catch (err) {
+    const e = err as { message?: string; stderr?: string; killed?: boolean };
+    const stderr = (e.stderr ?? "").trim().slice(0, 500);
+    const motivo = e.killed
+      ? "o PowerShell demorou demais (timeout de 60s)"
+      : stderr || e.message || String(err);
+    return { ok: false, message: `Não consegui controlar a janela: ${motivo}` };
+  }
+}
+
+const WEB_TIMEOUT_MS = 20000;
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+
+function stripTags(raw: string): string {
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Limpa a consulta de busca: o modelo/builtin às vezes inclui o nome da rede
+ * ou o verbo na consulta ("no google X", "pesquisa no google X", "google X").
+ * Tira só prefixos — nunca altera o assunto em si. Exportado para testes.
+ */
+export function cleanSearchQuery(raw: string): string {
+  let q = (raw ?? "").trim().replace(/^[\s,.:;!?]+|[\s,.:;!?]+$/g, "");
+  // "no google X" / "na internet X" / "no navegador X" / "no youtube X"
+  q = q.replace(
+    /^(?:no|na|em|neste|nesta)\s+(?:google|gogle|internet|web|navegador|browser|youtube|youtu|yt)\s+(?:sobre\s+|por\s+|o que e\s+|o que é\s+)?/i,
+    "",
+  );
+  // "pesquise no google X" (modelo repetiu o verbo e a rede)
+  q = q.replace(
+    /^(?:pesquise|pesquisa|pesquisar|procure|procura|busque|busca)\s+(?:no|na)\s+(?:google|internet|web)\s+(?:sobre\s+|por\s+)?/i,
+    "",
+  );
+  // "google X" / "youtube X" no início (modelo pôs a rede na consulta)
+  q = q.replace(/^(?:google|gogle|youtube|youtu|yt)\s+/i, "");
+  return q.trim();
+}
+
+/** Busca na web (sem API key, via DuckDuckGo). Hermes: mesma busca em 3 min vem do cache. */
+export const toolWebSearch = cachedTool("web_search", 3 * 60 * 1000, toolWebSearchImpl);
+
+async function toolWebSearchImpl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const query = cleanSearchQuery(args.consulta ?? args.query ?? args.q ?? "");
+  if (!query) return { ok: false, message: "Nenhuma consulta fornecida." };
+  try {
+    const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+    });
+    if (!res.ok) return { ok: false, message: `Busca falhou (HTTP ${res.status}).` };
+    const html = await res.text();
+
+    // Extrai blocos de resultado (título, trecho, link) do HTML do DuckDuckGo
+    const blocks = html.split(/<div class="result/).slice(1).slice(0, 5);
+    const lines: string[] = [];
+    for (const block of blocks) {
+      const titleM = block.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/i);
+      const snipM = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+      const linkM = block.match(/class="result__a" href="([^"]+)"/i);
+      const title = titleM ? stripTags(titleM[1]).slice(0, 80) : "";
+      const snip = snipM ? stripTags(snipM[1]).slice(0, 160) : "";
+      if (!title && !snip) continue;
+      let url = "";
+      const href = linkM?.[1] ?? "";
+      const uddg = href.match(/uddg=([^&]+)/);
+      if (uddg) url = decodeURIComponent(uddg[1]);
+      else if (href.startsWith("http")) url = href;
+      lines.push(`• ${title}${url ? ` — ${url}` : ""}${snip ? `\n  ${snip}` : ""}`);
+    }
+    if (lines.length === 0) return { ok: true, message: "Nenhum resultado encontrado para a busca." };
+    return { ok: true, message: lines.join("\n") };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui pesquisar na internet: ${msg}` };
+  }
+}
+
+/** Lê o conteúdo de uma página da web e devolve o texto principal. */
+export async function toolFetchUrl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  let raw = (args.url ?? args.link ?? args.site ?? "").trim();
+  if (!raw) return { ok: false, message: "Nenhuma URL fornecida." };
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  try {
+    const res = await fetch(raw, {
+      headers: { "User-Agent": UA },
+      redirect: "follow",
+      signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+    });
+    if (!res.ok) return { ok: false, message: `Falha ao acessar a página (HTTP ${res.status}).` };
+    const contentType = res.headers.get("content-type") ?? "";
+    const text = await res.text();
+    if (contentType.includes("json")) {
+      return { ok: true, message: text.slice(0, 800) };
+    }
+    const isText = contentType === "" || /text\//i.test(contentType) || /xml/i.test(contentType);
+    if (!isText) {
+      return {
+        ok: false,
+        message: `A página não é texto legível (${contentType.split(";")[0].trim() || "formato binário"}).`,
+      };
+    }
+    const titleM = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = titleM ? stripTags(titleM[1]).slice(0, 120) : raw;
+    // Limita o HTML bruto antes de extrair texto para não trabalhar de graça em páginas gigantes
+    const body = stripTags(text.slice(0, 30000))
+      .replace(/\s+/g, " ")
+      .slice(0, 1200);
+    return { ok: true, message: `${title}\n${body || "Página sem conteúdo legível."}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui acessar a página: ${msg}` };
+  }
+}
+
+/** Abre uma URL no navegador padrão do sistema. */
+export async function toolOpenUrl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  let raw = (args.url ?? args.link ?? args.site ?? "").trim();
+  if (!raw) return { ok: false, message: "Nenhuma URL fornecida." };
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  try {
+    const win = os.platform() === "win32";
+    await execAsync(win ? `start "" "${raw.replace(/"/g, '\\"')}"` : `open "${raw}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return { ok: true, message: `Abrindo no navegador: ${raw}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui abrir o navegador: ${msg}` };
+  }
+}
+
+// Mapeia nomes comuns de programas no Windows para o comando/executável
+const PROGRAM_ALIASES: Record<string, string> = {
+  "bloco de notas": "notepad",
+  notepad: "notepad",
+  calculadora: "calc",
+  calc: "calc",
+  paint: "mspaint",
+  "editor de texto": "notepad",
+  editor: "notepad",
+  explorador: "explorer",
+  chrome: "chrome",
+  "google chrome": "chrome",
+  edge: "msedge",
+  firefox: "firefox",
+  discord: "discord",
+  whatsapp: "whatsapp",
+  telegram: "telegram",
+  instagram: "instagram",
+  spotify: "spotify",
+  vscode: "code",
+  "visual studio code": "code",
+  cmd: "cmd",
+  "prompt de comando": "cmd",
+  terminal: "cmd",
+  powershell: "powershell",
+  "gerenciador de tarefas": "taskmgr",
+  taskmgr: "taskmgr",
+  winrar: "winrar",
+  word: "winword",
+  excel: "excel",
+  powerpoint: "powerpoint",
+  "outlook": "outlook",
+  "explorer de arquivos": "explorer",
+  fotos: "ms-photos",
+};
+
+const LOCAL_APPDATA = process.env.LOCALAPPDATA ?? path.join(HOME, "AppData", "Local");
+const ROAMING_APPDATA = process.env.APPDATA ?? path.join(HOME, "AppData", "Roaming");
+
+// Locais conhecidos de instalação para apps que não se registram no App Paths
+const KNOWN_APP_PATTERNS: Record<string, string[]> = {
+  whatsapp: [
+    path.join(LOCAL_APPDATA, "WhatsApp", "WhatsApp.exe"),
+    path.join(LOCAL_APPDATA, "WhatsApp", "app-*", "WhatsApp.exe"),
+    path.join(LOCAL_APPDATA, "Programs", "WhatsApp", "WhatsApp.exe"),
+  ],
+  discord: [path.join(LOCAL_APPDATA, "Discord", "app-*", "Discord.exe")],
+  spotify: [path.join(ROAMING_APPDATA, "Spotify", "Spotify.exe")],
+  telegram: [path.join(ROAMING_APPDATA, "Telegram Desktop", "Telegram.exe")],
+};
+
+async function runCapture(cmd: string): Promise<string> {
+  try {
+    const { stdout } = await execAsync(cmd, {
+      cwd: HOME,
+      timeout: 10000,
+      windowsHide: true,
+    });
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+/** Checa um caminho direto ou um padrão com curinga (ex.: pasta app-* dentro de um diretório). */
+async function findByGlob(pattern: string): Promise<string | null> {
+  const wildcardIdx = pattern.indexOf("*");
+  if (wildcardIdx < 0) {
+    return fs
+      .access(pattern)
+      .then(() => pattern)
+      .catch(() => null);
+  }
+  const before = pattern.slice(0, wildcardIdx);
+  const after = pattern.slice(wildcardIdx + 1);
+  const dir = path.dirname(before);
+  const prefix = path.basename(before);
+  try {
+    const entries = await fs.readdir(dir);
+    for (const e of entries) {
+      if (!e.startsWith(prefix)) continue;
+      const candidate = path.join(dir, e, after);
+      if (await fs.access(candidate).then(() => true).catch(() => false)) return candidate;
+    }
+  } catch {
+    /* pasta não existe */
+  }
+  return null;
+}
+
+async function findInPath(name: string): Promise<string | null> {
+  const out = await runCapture(`where.exe "${name}"`);
+  const first = out
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find(Boolean);
+  return first || null;
+}
+
+function expandEnv(p: string): string {
+  return p
+    .replace(/%LOCALAPPDATA%/gi, LOCAL_APPDATA)
+    .replace(/%APPDATA%/gi, ROAMING_APPDATA)
+    .replace(/%USERPROFILE%/gi, HOME)
+    .replace(/%HOMEDRIVE%%HOMEPATH%/gi, HOME);
+}
+
+async function findInAppPaths(exeName: string): Promise<string | null> {
+  const bases = [
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+  ];
+  for (const base of bases) {
+    const out = await runCapture(`reg query "${base}\\${exeName}" /ve`);
+    const m = out.match(/Default\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)$/im);
+    if (!m) continue;
+    const p = expandEnv(m[1].trim());
+    if (await fs.access(p).then(() => true).catch(() => false)) return p;
+  }
+  return null;
+}
+
+/** Resolve o caminho real de um programa instalado no Windows. */
+async function resolveProgram(name: string): Promise<string | null> {
+  const n = name.trim();
+  if (!n) return null;
+  const exeName = /\.exe$/i.test(n) ? n : `${n}.exe`;
+  const direct = await findByGlob(n);
+  if (direct) return direct;
+  const inPath = await findInPath(exeName);
+  if (inPath) return inPath;
+  const appPaths = await findInAppPaths(exeName);
+  if (appPaths) return appPaths;
+  for (const pat of KNOWN_APP_PATTERNS[n.toLowerCase()] ?? []) {
+    const hit = await findByGlob(pat);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Apps instalados pela Microsoft Store: localizam-se pelo pacote (Get-AppxPackage)
+// e abrem através do identificador AppUserModelID (shell:AppsFolder).
+const STORE_APP_IDS: Record<string, { search: string; appId: string }> = {
+  whatsapp: { search: "WhatsApp", appId: "App" },
+  instagram: { search: "Instagram", appId: "Instagram" },
+};
+
+async function findStoreApp(appKey: string): Promise<string | null> {
+  const cfg = STORE_APP_IDS[appKey];
+  if (!cfg) return null;
+  const cmd = `powershell -NoProfile -Command "Get-AppxPackage | Where-Object { $_.Name -like '*${cfg.search}*' } | Select-Object -First 1 -ExpandProperty PackageFamilyName"`;
+  const out = await runCapture(cmd);
+  const family = out
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find(Boolean);
+  if (!family) return null;
+  return `${family}!${cfg.appId}`;
+}
+
+/** Abre um programa/aplicativo instalado no computador. */
+export async function toolOpenProgram(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const raw = (args.programa ?? args.app ?? args.nome ?? "").trim();
+  if (!raw) return { ok: false, message: "Nenhum programa informado." };
+  const alias = PROGRAM_ALIASES[raw.toLowerCase()] ?? raw;
+  try {
+    const win = os.platform() === "win32";
+    if (win) {
+      const exe = await resolveProgram(alias);
+      if (exe) {
+        // Caminho real do executável: abre o programa, nunca uma pasta
+        await execAsync(`start "" "${exe.replace(/"/g, '\\"')}"`, {
+          cwd: HOME,
+          timeout: EXEC_TIMEOUT,
+        });
+      } else {
+        const aumid = await findStoreApp(alias.toLowerCase());
+        if (aumid) {
+          // App da Microsoft Store (ex.: WhatsApp): abre pelo AppUserModelID
+          await execAsync(`start "" "shell:AppsFolder\\${aumid}"`, {
+            cwd: HOME,
+            timeout: EXEC_TIMEOUT,
+          });
+        } else if (alias === "whatsapp") {
+          // Nem desktop nem Store → abre o WhatsApp Web com a lista de contatos
+          await execAsync(`start "" "https://web.whatsapp.com/"`, {
+            cwd: HOME,
+            timeout: EXEC_TIMEOUT,
+          });
+        } else if (alias === "instagram") {
+          await execAsync(`start "" "https://www.instagram.com/"`, {
+            cwd: HOME,
+            timeout: EXEC_TIMEOUT,
+          });
+        } else if (/^[A-Za-z0-9._-]+$/.test(alias)) {
+          // Nome simples sem aspas: o ShellExecute resolve via App Paths / PATH
+          await execAsync(`start "" ${alias}.exe`, { cwd: HOME, timeout: EXEC_TIMEOUT });
+        } else {
+          await execAsync(`start "" "${alias.replace(/"/g, '\\"')}"`, {
+            cwd: HOME,
+            timeout: EXEC_TIMEOUT,
+          });
+        }
+      }
+    } else {
+      await execAsync(alias, { cwd: HOME, timeout: EXEC_TIMEOUT });
+    }
+    return { ok: true, message: `Abrindo o programa: ${raw}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui abrir o programa ${raw}: ${msg}` };
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Codifica um script PowerShell em base64 UTF-16LE (sem problemas de escaping). */
+function psEncodedCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+/** Abre o aplicativo do WhatsApp do Windows (desktop ou Microsoft Store). */
+async function openWhatsAppApp(): Promise<boolean> {
+  const exe = await resolveProgram("whatsapp");
+  if (exe) {
+    await execAsync(`start "" "${exe.replace(/"/g, '\\"')}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return true;
+  }
+  const aumid = await findStoreApp("whatsapp");
+  if (aumid) {
+    await execAsync(`start "" "shell:AppsFolder\\${aumid}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return true;
+  }
+  return false;
+}
+
+/** Gera o script PowerShell da automação do WhatsApp (exportado para testes). */
+export function buildWhatsAppScript(
+  contactName: string,
+  phoneNumber: string,
+  message: string,
+): string {
+  const digits = phoneNumber.replace(/\D/g, "");
+  const esc = (s: string) => s.replace(/'/g, "''").replace(/\r?\n/g, " ");
+  const uri = `whatsapp://send?phone=${digits}&text=${encodeURIComponent(message)}`;
+  const normName = contactName
+    .toLowerCase()
+    .replace(/[áàâãä]/g, "a")
+    .replace(/[éèêë]/g, "e")
+    .replace(/[íìîï]/g, "i")
+    .replace(/[óòôõö]/g, "o")
+    .replace(/[úùûü]/g, "u")
+    .replace(/[ç]/g, "c");
+
+  return [
+    `$ErrorActionPreference = 'Stop'`,
+    // 2) Fecha qualquer conversa aberta e foca no aplicativo
+    `$ws = New-Object -ComObject WScript.Shell`,
+    `$p0 = Get-Process -Name 'WhatsApp' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1`,
+    `$before = '' + $(if ($p0) { $p0.MainWindowTitle })`,
+    `$ok = $ws.AppActivate('WhatsApp')`,
+    `if (-not $ok) { Start-Sleep -Seconds 3; $ok = $ws.AppActivate('WhatsApp') }`,
+    `if (-not $ok) { Write-Output 'FALHA_ATIVACAO'; exit 1 }`,
+    // 3) Abre a conversa exata pelo número (sem busca por nome; mensagem preenchida)
+    `Start-Process '${esc(uri)}'`,
+    `Start-Sleep -Seconds 4`,
+    `$ok = $ws.AppActivate('WhatsApp')`,
+    `if (-not $ok) { Start-Sleep -Seconds 3; $ok = $ws.AppActivate('WhatsApp') }`,
+    `if (-not $ok) { Write-Output 'FALHA_ATIVACAO'; exit 1 }`,
+    // 4) Verifica que a conversa abriu: o título da janela muda para o contato
+    `$p = Get-Process -Name 'WhatsApp' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1`,
+    `$title = '' + $(if ($p) { $p.MainWindowTitle })`,
+    `$norm = { param($s) $s.ToLower() -replace '[áàâãä]','a' -replace '[éèêë]','e' -replace '[íìîï]','i' -replace '[óòôõö]','o' -replace '[úùûü]','u' -replace '[ç]','c' }`,
+    `$normTitle = & $norm $title`,
+    `$normBefore = & $norm $before`,
+    `$expect = '${esc(normName || digits)}'`,
+    `$navigated = ($normTitle -ne '' -and $normTitle -ne $normBefore)`,
+    `if (($normTitle -notlike "*$expect*") -and -not $navigated) { Write-Output 'FALHA_CONVERSA'; exit 1 }`,
+    `Start-Sleep -Milliseconds 500`,
+    // 5) Envia (a mensagem já está preenchida pelo protocolo)
+    `$ws.SendKeys('{ENTER}')`,
+    `Start-Sleep -Milliseconds 900`,
+    `Write-Output 'ENVIADO'`,
+  ].join("\n");
+}
+
+/**
+ * Automatiza o aplicativo do WhatsApp no Windows: abre a conversa exata pelo
+ * número via protocolo whatsapp:// (a mensagem já vem preenchida), ativa a
+ * janela e confirma visualmente que a conversa abriu antes de pressionar ENTER.
+ */
+async function whatsappDesktopSend(
+  contactName: string,
+  phoneNumber: string,
+  message: string,
+): Promise<{ ok: boolean; detail: string }> {
+  if (os.platform() !== "win32") {
+    return { ok: false, detail: "automação disponível apenas no Windows" };
+  }
+
+  // 1) Garante o aplicativo aberto (nunca o navegador)
+  const opened = await openWhatsAppApp();
+  if (!opened) return { ok: false, detail: "WhatsApp não instalado" };
+  await sleep(4500); // espera o app carregar
+
+  const digits = phoneNumber.replace(/\D/g, "");
+  if (!digits) return { ok: false, detail: "número inválido" };
+
+  const script = buildWhatsAppScript(contactName, phoneNumber, message);
+
+  const cmd = `powershell -NoProfile -EncodedCommand ${psEncodedCommand(script)}`;
+  try {
+    const { stdout, stderr } = await execAsync(cmd, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+      windowsHide: true,
+    });
+    const out = (stdout || stderr || "").trim();
+    if (out.includes("ENVIADO")) return { ok: true, detail: "" };
+    if (out.includes("FALHA_ATIVACAO")) {
+      return { ok: false, detail: "não consegui ativar a janela do WhatsApp" };
+    }
+    if (out.includes("FALHA_CONVERSA")) {
+      return { ok: false, detail: "não consegui abrir a conversa do contato no WhatsApp" };
+    }
+    return { ok: false, detail: "a automação não concluiu" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, detail: msg };
+  }
+}
+
+/**
+ * Normaliza um número de telefone BR: tira o zero de discagem (01199999… →
+ * 1199999…) e, se for número nacional (10-11 dígitos) sem código do país,
+ * acrescenta o +55 — o protocolo whatsapp:// exige o código internacional.
+ */
+export function normalizeBrNumber(raw: string): string {
+  let n = (raw ?? "").replace(/\D/g, "");
+  if (!n) return n;
+  if (n.startsWith("0")) n = n.slice(1);
+  if ((n.length === 10 || n.length === 11) && !n.startsWith("55")) n = `55${n}`;
+  return n;
+}
+
+/**
+ * Envia uma mensagem no WhatsApp pela sessão real (whatsapp-web.js):
+ * primeiro tenta o servidor (conexão rápida e confiável); se ele não estiver
+ * conectado, tenta o aplicativo do Windows; por fim, abre a conversa no
+ * navegador com a mensagem preenchida. O envio real só acontece depois da
+ * confirmação por voz (ver executor.ts).
+ */
+export async function toolSendWhatsApp(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const contato = (args.contato ?? "").trim();
+  let numero = normalizeBrNumber(args.numero ?? args.telefone ?? args.para ?? "");
+  // O nome do contato SEMPRE manda: resolve o número pela memória. Evita que o
+  // modelo invente um número qualquer ao passar um contato junto.
+  if (contato) {
+    const found = findContactSync(contato);
+    if (found) {
+      numero = normalizeBrNumber(found);
+    } else if (!numero) {
+      return {
+        ok: false,
+        message: `Não tenho o número de ${contato} na memória. Me diga o número, por exemplo: "o número da ${contato} é 5511999999999", que eu guardo e uso da próxima vez.`,
+      };
+    }
+  }
+  const mensagem = (args.mensagem ?? args.texto ?? args.msg ?? "Oi!").trim();
+  if (!numero) return { ok: false, message: "Informe o número ou o contato do WhatsApp." };
+
+  // 1) Caminho principal: sessão real via servidor whatsapp-web.js
+  const serverUp = await ensureWhatsappServer();
+  if (serverUp) {
+    const status = await waStatus();
+    if (status?.connected) {
+      const res = await waSend(numero, mensagem);
+      if (res.ok) {
+        return { ok: true, message: `Mensagem enviada para ${contato || numero} no WhatsApp: ${mensagem}` };
+      }
+      if (status.lastError) {
+        return { ok: false, message: `WhatsApp conectado mas o envio falhou: ${res.message}` };
+      }
+    }
+  }
+
+  // 2) Segunda via: automação no aplicativo do Windows (sessão antiga)
+  const auto = await whatsappDesktopSend(contato, numero, mensagem);
+  if (auto.ok) {
+    return { ok: true, message: `Mensagem enviada para ${contato || numero} no WhatsApp: ${mensagem}` };
+  }
+
+  // 3) Última via: abre a conversa no navegador com a mensagem preenchida
+  const url = `https://wa.me/${numero}${mensagem ? `?text=${encodeURIComponent(mensagem)}` : ""}`;
+  try {
+    await execAsync(os.platform() === "win32" ? `start "" "${url}"` : `open "${url}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return {
+      ok: true,
+      message: `A sessão do WhatsApp ainda não está conectada (escaneie o QR na janela do WhatsApp). Abri a conversa no navegador com a mensagem: ${mensagem}`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      message: `Não consegui enviar: abra a janela do WhatsApp (diga \"abre o whatsapp\"), escaneie o QR e tente de novo. Detalhe: ${msg}`,
+    };
+  }
+}
+
+/**
+ * Lê as conversas do WhatsApp pela sessão real. Sem "conversa", lista as
+ * conversas recentes (nome + última mensagem); com "conversa", mostra as
+ * últimas mensagens daquele contato/grupo (por nome ou número).
+ */
+export async function toolWhatsAppRead(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const servidor = await ensureWhatsappServer();
+  if (!servidor) {
+    return { ok: false, message: "Não consegui iniciar a sessão do WhatsApp agora." };
+  }
+  const status = await waStatus();
+  if (!status?.connected) {
+    return {
+      ok: false,
+      message: `A sessão do WhatsApp ainda não está conectada. Diga \"abre o whatsapp\" para ver o QR code no HUD e escaneie com o celular.${status?.sessionExists ? " (A sessão salva existe — deve reconectar sozinha.)" : ""}`,
+    };
+  }
+
+  const conversa = (args.conversa ?? args.contato ?? args.com ?? "").trim();
+  const limite = Math.min(Math.max(Number(args.limite ?? args.n ?? "10") || 10, 3), 25);
+
+  // Sem conversa: lista as conversas recentes
+  if (!conversa) {
+    const chats = await waChats();
+    if (!chats.length) return { ok: true, message: "Nenhuma conversa recente no WhatsApp." };
+    const lines = chats.slice(0, Math.min(limite, 12)).map((c, i) => {
+      const msg = c.lastMessage ? ` — ${c.lastMessage}` : "";
+      return `${i + 1}. ${c.name}${msg}`;
+    });
+    return {
+      ok: true,
+      message: `Suas conversas recentes do WhatsApp:\n${lines.join("\n")}`,
+    };
+  }
+
+  // Com conversa: acha pelo nome (case-insensitive, parte do nome) ou número
+  const chats = await waChats();
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9 ]/gi, "")
+      .trim();
+  const alvo = norm(conversa);
+  const digits = conversa.replace(/\D/g, "");
+  let chat = chats.find((c) => norm(c.name) === alvo);
+  if (!chat) chat = chats.find((c) => norm(c.name).includes(alvo));
+  if (!chat && digits.length >= 8) {
+    chat = chats.find((c) => c.id.replace(/\D/g, "").endsWith(digits));
+  }
+  if (!chat) {
+    return {
+      ok: false,
+      message: `Não achei uma conversa chamada \"${conversa}\" nas recentes. Use \"leia o whatsapp\" para ver a lista.`,
+    };
+  }
+
+  const data = await waMessages(chat.id, limite);
+  if (!data || !data.messages.length) {
+    return { ok: true, message: `A conversa com ${chat.name} não tem mensagens visíveis ainda.` };
+  }
+  const lines = data.messages.map((m) => {
+    const quem = m.fromMe ? "Você" : chat.name;
+    const hora = new Date(m.at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    return `${quem} (${hora}): ${m.body}`;
+  });
+  return {
+    ok: true,
+    message: `Conversa com ${chat.name} (últimas ${lines.length}):\n${lines.join("\n")}`,
+  };
+}
+
+/** Guarda uma informação na memória permanente (sobrevive ao desligar o PC). */
+export async function toolRemember(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return remember(args.chave ?? args.key ?? "", args.valor ?? args.value ?? "");
+}
+
+/** Apaga uma informação da memória permanente. */
+export async function toolForget(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return forget(args.chave ?? args.key ?? args.oque ?? args.qual ?? "");
+}
+
+/** Adiciona uma tarefa à lista de tarefas do usuário. */
+export async function toolAddTask(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return addTask(args.tarefa ?? args.task ?? args.texto ?? "");
+}
+
+/** Remove uma tarefa da lista (correspondência parcial é aceita). */
+export async function toolRemoveTask(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return removeTask(args.tarefa ?? args.task ?? args.qual ?? "");
+}
+
+/** Lista as tarefas do usuário. */
+export async function toolListTasks(): Promise<{ ok: boolean; message: string }> {
+  const tasks = listTasks();
+  if (!tasks.length) {
+    return { ok: true, message: "Sua lista de tarefas está vazia. Quer que eu anote algo?" };
+  }
+  const numbered = tasks.map((t, i) => `${i + 1}. ${t}`).join("\n");
+  return {
+    ok: true,
+    message: `Suas ${tasks.length} tarefa${tasks.length === 1 ? "" : "s"}:\n${numbered}`,
+  };
+}
+
+/** Marca um compromisso na agenda (interpreta data/hora em português). */
+export async function toolAddAgenda(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const texto = (args.texto ?? args.titulo ?? "").trim();
+  const quando = (args.quando ?? args.data ?? "").trim();
+  const completo = quando ? `${texto} ${quando}` : texto;
+  return addAgenda(completo || (args.compromisso ?? ""));
+}
+
+/** Remove um compromisso da agenda (id, número ou parte do título). */
+export async function toolRemoveAgenda(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return removeAgenda(args.filtro ?? args.qual ?? args.item ?? args.compromisso ?? "");
+}
+
+/** Lista os compromissos da agenda (filtro opcional: hoje/amanhã/semana/data). */
+export async function toolListAgenda(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  return agendaListMessage(args.quando ?? args.dia ?? args.filtro ?? "");
+}
+
+/** Devolve a lista crua de compromissos (usado pela API /api/agenda). */
+export function toolListAgendaRaw(filtro?: string) {
+  return listAgenda(filtro);
+}
+
+// ——— Controle financeiro ———
+/** Registra uma receita ou despesa. */
+export async function toolAddTransaction(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  const tipoRaw = (args.tipo ?? "").toLowerCase();
+  const tipo: TransacaoTipo =
+    tipoRaw.startsWith("rece") || tipoRaw.startsWith("ganh") ? "receita" : "despesa";
+  const valor = Number(String(args.valor ?? "").replace(/[^\d.,]/g, "").replace(/\.(?=.*\.)/g, "").replace(",", "."));
+  if (!Number.isFinite(valor) || valor <= 0) {
+    return {
+      ok: false,
+      message:
+        "Fale o valor — ex.: adiciona despesa de 50 reais em alimentação, ou registra receita de 2000.",
+    };
+  }
+  const categoria = (args.categoria ?? "outros").trim() || "outros";
+  const t = addTransacao({
+    tipo,
+    valor,
+    categoria,
+    descricao: args.descricao || args.o_que || undefined,
+  });
+  return { ok: true, message: `Registrei: ${formatTransacao(t)}` };
+}
+
+/** Remove um lançamento (id, "#1" ou parte da descrição). */
+export async function toolRemoveTransaction(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  const ref = (args.ref ?? args.qual ?? args.item ?? args.id ?? "").trim();
+  if (!ref) {
+    return { ok: false, message: "Diga qual lançamento remover (ex.: #1 ou a descrição)." };
+  }
+  return removeTransacao(ref);
+}
+
+/** Lista os últimos lançamentos. */
+export async function toolListTransactions(
+  args: Record<string, string>,
+): Promise<{ ok: boolean; message: string }> {
+  const limite = Math.min(50, Math.max(1, Number(args.limite ?? "10") || 10));
+  const ts = listTransacoes(limite);
+  if (!ts.length) {
+    return { ok: true, message: "Nenhum lançamento registrado ainda." };
+  }
+  const numeradas = ts.map((t, i) => `#${i + 1} ${formatTransacao(t)}`).join("\n");
+  return { ok: true, message: `Seus últimos lançamentos:\n${numeradas}` };
+}
+
+/** Resumo financeiro: saldo + totais e categorias do mês. */
+export async function toolFinanceSummary(): Promise<{ ok: boolean; message: string }> {
+  const s = financeSummary();
+  const cats = s.porCategoria
+    .slice(0, 3)
+    .map((c) => `${c.categoria} ${formatValor(c.total)}`)
+    .join(", ");
+  let msg = `Saldo: ${formatValor(s.saldo)}. Neste mês: receitas ${formatValor(
+    s.receitasMes,
+  )}, despesas ${formatValor(s.despesasMes)}.`;
+  if (cats) msg += ` Maiores gastos: ${cats}.`;
+  return { ok: true, message: msg };
+}
+
+/** Converte medidas: comprimento, massa, volume, velocidade, tempo, dados e temperatura. */
+export async function toolConvertUnits(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const rawValor = (args.valor ?? args.amount ?? "1").trim();
+  const de = (args.de ?? args.from ?? "").trim();
+  const para = (args.para ?? args.to ?? "").trim();
+  if (!de || !para) {
+    return { ok: false, message: "Informe as unidades, por exemplo: 5 quilômetros em metros." };
+  }
+  const parsed = rawValor
+    .replace(/\s+/g, "")
+    .replace(/[.](?=\d{3}(?:[.,]|$))/g, "") // 1.000 → 1000
+    .replace(",", ".");
+  const valor = parseFloat(parsed);
+  if (!Number.isFinite(valor) || valor < 0) {
+    return { ok: false, message: `Não entendi o valor "${rawValor}".` };
+  }
+  const res = convertUnit(valor, de, para);
+  if (!res) {
+    const kindDe = unitKindLabel(de);
+    const kindPara = unitKindLabel(para);
+    if (kindDe && kindPara && kindDe !== kindPara) {
+      return {
+        ok: false,
+        message: `${de} é medida de ${kindDe} e ${para} é de ${kindPara} — não dá para converter.`,
+      };
+    }
+    return { ok: false, message: `Não reconheci a unidade "${de}" ou "${para}".` };
+  }
+  const fmt = (n: number) =>
+    n.toLocaleString("pt-BR", {
+      maximumFractionDigits: Math.abs(n) >= 10000 ? 0 : Math.abs(n) >= 10 ? 2 : 4,
+    });
+  return { ok: true, message: `${fmt(valor)} ${de} equivalem a ${fmt(res.result)} ${res.unidade}.` };
+}
+
+/** Abre o perfil de um usuário no Instagram. */
+export async function toolOpenInstagram(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const user = (args.usuario ?? args.perfil ?? args.para ?? "").trim().replace(/^@/, "");
+  if (!user) return { ok: false, message: "Informe o usuário do Instagram." };
+  const url = `https://www.instagram.com/${encodeURIComponent(user)}/`;
+  try {
+    await execAsync(os.platform() === "win32" ? `start "" "${url}"` : `open "${url}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return { ok: true, message: `Abrindo o perfil @${user} no Instagram.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui abrir o Instagram: ${msg}` };
+  }
+}
+
+const SOCIAL_SEARCH_URLS: Record<string, string> = {
+  youtube: "https://www.youtube.com/results?search_query={q}",
+  tiktok: "https://www.tiktok.com/search?q={q}",
+  x: "https://x.com/search?q={q}",
+  twitter: "https://x.com/search?q={q}",
+  instagram: "https://www.instagram.com/{q}/",
+  facebook: "https://www.facebook.com/search/top?q={q}",
+  linkedin: "https://www.linkedin.com/search/results/all/?keywords={q}",
+  github: "https://github.com/search?q={q}&type=users",
+  google: "https://www.google.com/search?q={q}",
+  site: "https://www.google.com/search?q={q}",
+  web: "https://www.google.com/search?q={q}",
+};
+
+/**
+ * Busca no YouTube e devolve o ID do PRIMEIRO vídeo do resultado.
+ * O HTML da busca embute o ytInitialData com os videoIds; extrai o primeiro.
+ * Exportado para o teste (e útil para tocar música/vídeo direto).
+ */
+export async function youtubeFirstVideoId(query: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&hl=pt-BR`,
+      {
+        headers: { "User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9" },
+        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+      },
+    );
+    if (!res.ok) return null;
+    const html = await res.text();
+    const m = html.match(/"videoId":"([A-Za-z0-9_-]{11})"/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Busca a primeira URL de vídeo real de redes que bloqueiam scraping (TikTok,
+ * Instagram Reels) usando o DuckDuckGo: o HTML da busca contém os links reais
+ * (uddg). Devolve null se não achar nada — o chamador cai na página de busca.
+ */
+export async function firstVideoFromSearch(
+  query: string,
+  urlTest: (u: string) => boolean,
+): Promise<string | null> {
+  // Retry simples: o DuckDuckGo às vezes responde 202 (desafio anti-bot) numa
+  // consulta isolada; uma segunda tentativa segundos depois costuma passar.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+        headers: { "User-Agent": UA },
+        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      const html = await res.text();
+      const blocks = html.split(/<div class="result/).slice(1).slice(0, 10);
+      for (const block of blocks) {
+        const linkM = block.match(/class="result__a" href="([^"]+)"/);
+        const href = linkM?.[1] ?? "";
+        let url = "";
+        const uddg = href.match(/uddg=([^&]+)/);
+        if (uddg) url = decodeURIComponent(uddg[1]);
+        else if (href.startsWith("http")) url = href;
+        if (url && urlTest(url)) return url;
+      }
+      return null;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return null;
+}
+
+/** Pesquisa um perfil/pessoa/site em uma rede social específica. */
+export async function toolSocialSearch(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const rede = (args.rede ?? args.site ?? args.plataforma ?? "google").toLowerCase().trim();
+  const query = cleanSearchQuery(args.consulta ?? args.query ?? args.perfil ?? args.pessoa ?? "");
+  if (!query) return { ok: false, message: "Informe o que deseja pesquisar." };
+  const direto = /^(1|true|sim|yes)$/i.test((args.direto ?? "").trim());
+
+  // Música/vídeo específico: abre o PRIMEIRO resultado direto no player
+  if (direto) {
+    let url: string | null = null;
+    let achou = false;
+    if (rede === "youtube") {
+      const vid = await youtubeFirstVideoId(query);
+      if (vid) {
+        url = `https://www.youtube.com/watch?v=${vid}&autoplay=1`;
+        achou = true;
+      }
+    } else if (rede === "tiktok") {
+      url =
+        (await firstVideoFromSearch(
+          `site:tiktok.com ${query}`,
+          (u) => u.includes("tiktok.com/@") && u.includes("/video/"),
+        )) ??
+        (await firstVideoFromSearch(`site:tiktok.com ${query}`, (u) => /^https:\/\/vt\.tiktok\.com\//i.test(u)));
+      achou = url !== null;
+    } else if (rede === "instagram" || rede === "reels") {
+      url = await firstVideoFromSearch(
+        `site:instagram.com/reel ${query}`,
+        (u) => u.includes("instagram.com/reel/"),
+      );
+      achou = url !== null;
+    }
+
+    if (url) {
+      try {
+        await execAsync(os.platform() === "win32" ? `start "" "${url}"` : `open "${url}"`, {
+          cwd: HOME,
+          timeout: EXEC_TIMEOUT,
+        });
+        return { ok: true, message: `Tocando no ${rede} o primeiro resultado de "${query}".` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, message: `Não consegui tocar o vídeo: ${msg}` };
+      }
+    }
+
+    // Fallback honesto: abre a página de busca da rede com o termo certo
+    const fb =
+      rede === "instagram" || rede === "reels"
+        ? `https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(query)}`
+        : SOCIAL_SEARCH_URLS[rede]?.replace("{q}", encodeURIComponent(query)) ?? "";
+    if (fb) {
+      try {
+        await execAsync(os.platform() === "win32" ? `start "" "${fb}"` : `open "${fb}"`, {
+          cwd: HOME,
+          timeout: EXEC_TIMEOUT,
+        });
+        return {
+          ok: true,
+          message: `Não achei o vídeo exato — abri a busca por "${query}" no ${rede}.`,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, message: `Não consegui tocar o vídeo: ${msg}` };
+      }
+    }
+    return {
+      ok: false,
+      message: `Não consegui tocar o vídeo em ${rede}.`,
+    };
+  }
+
+  const base = SOCIAL_SEARCH_URLS[rede] ?? SOCIAL_SEARCH_URLS.google;
+  const url = base.replace("{q}", encodeURIComponent(query));
+  try {
+    await execAsync(os.platform() === "win32" ? `start "" "${url}"` : `open "${url}"`, {
+      cwd: HOME,
+      timeout: EXEC_TIMEOUT,
+    });
+    return { ok: true, message: `Pesquisando "${query}" em ${rede}.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui pesquisar: ${msg}` };
+  }
+}
+
+/**
+ * Encontra uma imagem sobre um assunto (Wikimedia Commons, URL direta e sem
+ * chave) e devolve a URL para o HUD MOSTRAR no painel. O cliente abre o
+ * visualizador quando vê o log da ferramenta show_image.
+ */
+export async function toolShowImage(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const assunto = cleanSearchQuery(args.assunto ?? args.consulta ?? args.query ?? "");
+  if (!assunto) return { ok: false, message: "Diga o que você quer ver na imagem." };
+  try {
+    const entries = await wikimediaSearch(assunto, "bitmap", 8);
+    const wide = (e: { width?: number }) => (e.width ?? 0) >= 400 || e.width == null;
+    const best =
+      entries.find((e) => e.mime === "image/jpeg" && wide(e)) ??
+      entries.find((e) => e.mime === "image/png" && wide(e)) ??
+      entries.find((e) => e.mime === "image/webp" && wide(e)) ??
+      entries.find((e) => wide(e));
+    if (!best?.url) {
+      return { ok: false, message: `Não achei uma imagem de ${assunto}.` };
+    }
+    return { ok: true, message: `Mostrando imagem de ${assunto}: ${best.url}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui buscar a imagem: ${msg}` };
+  }
+}
+
+const WMO_CODES: Record<number, string> = {
+  0: "céu limpo",
+  1: "poucas nuvens",
+  2: "parcialmente nublado",
+  3: "nublado",
+  45: "nevoeiro",
+  48: "neblina com gelo",
+  51: "chuvisco leve",
+  53: "chuvisco",
+  55: "chuvisco forte",
+  56: "chuvisco congelante",
+  57: "chuvisco congelante forte",
+  61: "chuva leve",
+  63: "chuva",
+  65: "chuva forte",
+  66: "chuva congelante leve",
+  67: "chuva congelante",
+  71: "neve leve",
+  73: "neve",
+  75: "neve forte",
+  77: "grãos de neve",
+  80: "pancadas de chuva",
+  81: "pancadas fortes de chuva",
+  82: "pancadas violentas de chuva",
+  85: "pancadas de neve",
+  86: "pancadas fortes de neve",
+  95: "tempestade",
+  96: "tempestade com granizo",
+  99: "tempestade com granizo forte",
+};
+
+const MOEDA_ALIASES: Record<string, string> = {
+  real: "BRL",
+  reais: "BRL",
+  brasil: "BRL",
+  brl: "BRL",
+  dolar: "USD",
+  "dolar americano": "USD",
+  dolares: "USD",
+  dólar: "USD",
+  dólares: "USD",
+  usd: "USD",
+  euro: "EUR",
+  euros: "EUR",
+  eur: "EUR",
+  libra: "GBP",
+  libras: "GBP",
+  gbp: "GBP",
+  iene: "JPY",
+  ienes: "JPY",
+  jpy: "JPY",
+  "peso argentino": "ARS",
+  ars: "ARS",
+  peso: "MXN",
+  "peso mexicano": "MXN",
+  mxn: "MXN",
+  franco: "CHF",
+  "franco suico": "CHF",
+  chf: "CHF",
+  "dolar canadense": "CAD",
+  cad: "CAD",
+  "dolar australiano": "AUD",
+  aud: "AUD",
+  yuan: "CNY",
+  "yuan chines": "CNY",
+  cny: "CNY",
+};
+
+const CRYPTO_IDS: Record<string, string> = {
+  bitcoin: "bitcoin",
+  btc: "bitcoin",
+  ethereum: "ethereum",
+  eth: "ethereum",
+  ether: "ethereum",
+  solana: "solana",
+  sol: "solana",
+  dogecoin: "dogecoin",
+  doge: "dogecoin",
+  cardano: "cardano",
+  ada: "cardano",
+  ripple: "ripple",
+  xrp: "ripple",
+  litecoin: "litecoin",
+  ltc: "litecoin",
+  binance: "binancecoin",
+  bnb: "binancecoin",
+  polkadot: "polkadot",
+  dot: "polkadot",
+  shiba: "shiba-inu",
+  shib: "shiba-inu",
+  chainlink: "chainlink",
+  link: "chainlink",
+  avalanche: "avalanche-2",
+  avax: "avalanche-2",
+};
+
+/** Faz uma requisição GET a uma API externa e devolve o JSON (com timeout). */
+async function apiFetchJson(
+  url: string,
+  timeoutMs = 15000,
+  init?: RequestInit,
+): Promise<Record<string, unknown> | Array<unknown>> {
+  const res = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { Accept: "application/json", ...(init?.headers ?? {}) },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as Record<string, unknown> | Array<unknown>;
+}
+
+function normKey(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+/** Previsão do tempo (Open-Meteo, sem chave). Hermes: cache de 10 min. */
+export const toolWeather = cachedTool("weather", 10 * 60 * 1000, toolWeatherImpl);
+
+async function toolWeatherImpl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const cidade = (args.cidade ?? args.local ?? args.lugar ?? "").trim();
+  if (!cidade) return { ok: false, message: "Diga para qual cidade quer a previsão do tempo." };
+  try {
+    const geo = (await apiFetchJson(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cidade)}&count=1&language=pt&format=json`,
+    )) as Record<string, unknown>;
+    const results = (geo.results as Array<Record<string, unknown>> | undefined) ?? [];
+    const hit = results[0];
+    if (!hit) return { ok: false, message: `Não encontrei a cidade ${cidade}.` };
+    const f = (await apiFetchJson(
+      `https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=3`,
+    )) as Record<string, unknown>;
+    const cur = (f.current ?? {}) as Record<string, number>;
+    const daily = (f.daily ?? {}) as Record<string, unknown[]>;
+    const nome = (hit.name as string) ?? cidade;
+    const cond = WMO_CODES[Math.round(cur.weather_code ?? 0)] ?? "condição indefinida";
+    const agora = `Agora em ${nome}: ${cond}, ${Math.round(cur.temperature_2m ?? 0)}°C (sensação ${Math.round(cur.apparent_temperature ?? 0)}°C), umidade ${Math.round(cur.relative_humidity_2m ?? 0)}% e vento de ${Math.round(cur.wind_speed_10m ?? 0)} km/h.`;
+    const times = (daily.time ?? []) as string[];
+    const dias = times
+      .map((t, i) => {
+        const dia = t.slice(5).split("-").reverse().join("/");
+        const min = Math.round((daily.temperature_2m_min?.[i] as number) ?? 0);
+        const max = Math.round((daily.temperature_2m_max?.[i] as number) ?? 0);
+        const chuva = daily.precipitation_probability_max?.[i];
+        return `${dia}: mín ${min}°, máx ${max}°${chuva != null ? `, ${Math.round(chuva as number)}% de chuva` : ""}`;
+      })
+      .join(". ");
+    return { ok: true, message: `${agora} ${dias}.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui buscar o tempo: ${msg}` };
+  }
+}
+
+/** Conversão de moedas (open.er-api.com, sem chave). Hermes: cache de 5 min. */
+export const toolCurrency = cachedTool("currency", 5 * 60 * 1000, toolCurrencyImpl);
+
+async function toolCurrencyImpl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const valorRaw = (args.valor ?? args.amount ?? "1").replace(/[^\d.,]/g, "").replace(",", ".");
+  const valor = parseFloat(valorRaw);
+  const de = normKey(args.de ?? args.from ?? "USD");
+  const para = normKey(args.para ?? args.to ?? "BRL");
+  if (!Number.isFinite(valor) || valor <= 0 || !de || !para) {
+    return { ok: false, message: "Informe a quantia e as moedas, por exemplo: 100 dólares em reais." };
+  }
+  const deCode = (MOEDA_ALIASES[de] ?? de.toUpperCase()).replace(/\s+/g, "");
+  const paraCode = (MOEDA_ALIASES[para] ?? para.toUpperCase()).replace(/\s+/g, "");
+  try {
+    const data = (await apiFetchJson("https://open.er-api.com/v6/latest/USD")) as Record<string, unknown>;
+    const rates = (data.rates ?? {}) as Record<string, number>;
+    const rDe = deCode === "USD" ? 1 : rates[deCode];
+    const rPara = paraCode === "USD" ? 1 : rates[paraCode];
+    if (!rDe || !rPara) {
+      return { ok: false, message: `Não conheço a moeda "${de}" ou "${para}".` };
+    }
+    const total = (valor / rDe) * rPara;
+    const fmt = (n: number) =>
+      n.toLocaleString("pt-BR", { maximumFractionDigits: n < 1000 ? 2 : 0 });
+    return { ok: true, message: `${fmt(valor)} ${de} equivale a ${fmt(total)} ${para}.` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui converter: ${msg}` };
+  }
+}
+
+/** Cotação de criptomoedas (CoinGecko, sem chave). Hermes: cache de 2 min. */
+export const toolCrypto = cachedTool("crypto", 2 * 60 * 1000, toolCryptoImpl);
+
+async function toolCryptoImpl(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const nome = normKey(args.cripto ?? args.moeda ?? args.nome ?? "bitcoin");
+  const id = CRYPTO_IDS[nome] ?? nome.replace(/[^a-z0-9]/g, "");
+  if (!id) return { ok: false, message: "Diga qual criptomoeda você quer saber a cotação." };
+  try {
+    const data = (await apiFetchJson(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(id)}&vs_currencies=brl,usd`,
+    )) as Record<string, unknown>;
+    const coin = (data[id] ?? {}) as Record<string, number>;
+    if (coin.brl == null) return { ok: false, message: `Não encontrei a criptomoeda ${nome}.` };
+    const label = nome.charAt(0).toUpperCase() + nome.slice(1);
+    return {
+      ok: true,
+      message: `${label} hoje: R$ ${coin.brl.toLocaleString("pt-BR", { maximumFractionDigits: 2 })} (US$ ${coin.usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}).`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui buscar a cotação: ${msg}` };
+  }
+}
+
+/** Informações de países (REST Countries, sem chave). */
+// Nomes em português → inglês (países cuja grafia difere da busca por acento)
+const PAIS_ALIASES: Record<string, string> = {
+  brasil: "Brazil",
+  alemanha: "Germany",
+  inglaterra: "United Kingdom",
+  "reino unido": "United Kingdom",
+  eua: "United States",
+  "estados unidos": "United States",
+  japao: "Japan",
+  franca: "France",
+  espanha: "Spain",
+  italia: "Italy",
+  portugal: "Portugal",
+  coreia: "South Korea",
+  "coreia do sul": "South Korea",
+  holanda: "Netherlands",
+  "paises baixos": "Netherlands",
+  suica: "Switzerland",
+  "nova zelandia": "New Zealand",
+  "africa do sul": "South Africa",
+  argentina: "Argentina",
+  mexico: "Mexico",
+};
+
+type CountryEntry = { name: string; iso2: string; iso3: string };
+let countriesCache: CountryEntry[] | null = null;
+let countriesCacheAt = 0;
+
+async function findCountryApiName(term: string): Promise<string | null> {
+  const key = normKey(term);
+  if (PAIS_ALIASES[key]) return PAIS_ALIASES[key];
+
+  const now = Date.now();
+  if (!countriesCache || now - countriesCacheAt > 6 * 3600 * 1000) {
+    const data = (await apiFetchJson("https://countriesnow.space/api/v0.1/countries")) as {
+      data?: CountryEntry[];
+    };
+    countriesCache = (data.data ?? []).slice(0, 500);
+    countriesCacheAt = now;
+  }
+  const list = countriesCache ?? [];
+  const exact = list.find((c) => normKey(c.name) === key);
+  if (exact) return exact.name;
+  if (key.length >= 4) {
+    const partial = list.find((c) => normKey(c.name).includes(key));
+    if (partial) return partial.name;
+  }
+  return null;
+}
+
+/** Informações de um país (countriesnow.space, sem chave). */
+export async function toolCountry(args: Record<string, string>): Promise<{ ok: boolean; message: string }> {
+  const nome = (args.pais ?? args.nome ?? "").trim();
+  if (!nome) return { ok: false, message: "Diga qual país você quer saber." };
+  try {
+    const apiName = await findCountryApiName(nome);
+    if (!apiName) return { ok: false, message: `Não encontrei o país ${nome}.` };
+
+    const post = (target: string) =>
+      apiFetchJson(
+        `https://countriesnow.space/api/v0.1/countries/${target}`,
+        15000,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ country: apiName }),
+        },
+      ) as Promise<{ data?: Record<string, unknown> }>;
+
+    const [capital, pop, moeda] = await Promise.all([
+      post("capital"),
+      post("population"),
+      post("currency"),
+    ]);
+
+    const cap = (capital.data?.capital as string) ?? "—";
+    const popCounts = (pop.data?.populationCounts as Array<{ year: number; value: number }>) ?? [];
+    const populacao = popCounts.length
+      ? `${popCounts[popCounts.length - 1].value.toLocaleString("pt-BR")} hab.`
+      : "—";
+    const moeadas = moeda.data?.currency as string | undefined;
+    const simbolo = moeda.data?.symbol as string | undefined;
+    const moedaTxt = moeadas ? `${moeadas}${simbolo ? ` (${simbolo})` : ""}` : "—";
+
+    return {
+      ok: true,
+      message: `${apiName}: capital ${cap}, população ${populacao} e moeda ${moedaTxt}.`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui buscar o país: ${msg}` };
+  }
+}
+
+/** Piada aleatória em português (JokeAPI, sem chave). */
+export async function toolJoke(): Promise<{ ok: boolean; message: string }> {
+  try {
+    const data = (await apiFetchJson("https://v2.jokeapi.dev/joke/Any?lang=pt&format=json")) as Record<string, unknown>;
+    if (data.type === "single" && data.joke) return { ok: true, message: String(data.joke) };
+    if (data.type === "twopart" && data.setup && data.delivery) {
+      return { ok: true, message: `${String(data.setup)} ... ${String(data.delivery)}` };
+    }
+    return { ok: false, message: "Não consegui buscar uma piada agora." };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui buscar uma piada: ${msg}` };
+  }
+}
+
+/** Novidades das últimas atualizações instaladas (a IA fala sem o nome da versão). */
+async function toolVerNovidades(): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { listarNovidades } = await import("../atualizador");
+    return { ok: true, message: listarNovidades() };
+  } catch {
+    return { ok: false, message: "Não consegui consultar as novidades das atualizações agora." };
+  }
+}
+
+const TOOL_IMPLS: Record<ToolName, (args: Record<string, string>) => Promise<{ ok: boolean; message: string }>> = {
+  create_folder: toolCreateFolder,
+  create_file: toolCreateFile,
+  create_project: toolCreateProject,
+  read_file: toolReadFile,
+  edit_file: toolEditFile,
+  list_folder: toolListFolder,
+  open_folder: toolOpenFolder,
+  delete_path: toolDeletePath,
+  rename_path: toolRenamePath,
+  web_search: toolWebSearch,
+  fetch_url: toolFetchUrl,
+  open_url: toolOpenUrl,
+  open_program: toolOpenProgram,
+  send_whatsapp: toolSendWhatsApp,
+  whatsapp_read: toolWhatsAppRead,
+  open_instagram: toolOpenInstagram,
+  social_search: toolSocialSearch,
+  weather: toolWeather,
+  currency: toolCurrency,
+  crypto: toolCrypto,
+  country: toolCountry,
+  joke: toolJoke,
+  remember: toolRemember,
+  forget: toolForget,
+  add_task: toolAddTask,
+  remove_task: toolRemoveTask,
+  list_tasks: toolListTasks,
+  add_agenda: toolAddAgenda,
+  remove_agenda: toolRemoveAgenda,
+  list_agenda: toolListAgenda,
+  convert_units: toolConvertUnits,
+  take_screenshot: toolTakeScreenshot,
+  screen_read: toolScreenRead,
+  screen_click: toolScreenClick,
+  type_text: toolTypeText,
+  screen_ask: toolScreenAsk,
+  window_control: toolWindowControl,
+  list_windows: toolListWindows,
+  show_image: toolShowImage,
+  add_transaction: toolAddTransaction,
+  remove_transaction: toolRemoveTransaction,
+  list_transactions: toolListTransactions,
+  finance_summary: toolFinanceSummary,
+  ver_novidades: toolVerNovidades,
+};
+
+export async function executeTool(call: ToolCall): Promise<{ ok: boolean; message: string }> {
+  const impl = TOOL_IMPLS[call.tool];
+  if (!impl) return { ok: false, message: "Ferramenta desconhecida." };
+  try {
+    const res = await impl(call.args);
+    return res;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Não consegui: ${msg}` };
+  }
+}
+
+/** Descreve a ação de forma curta para o painel de log do HUD. */
+export function describeLogText(call: ToolCall, ok: boolean, message: string): string {
+  const firstLine = message.split("\n")[0].trim();
+  if (!ok) return firstLine || "Falha na ação.";
+  return firstLine || "Ação executada.";
+}
+
+export const HOME_BASE = HOME;
+
+export const TOOL_JSON_SCHEMAS = [
+  {
+    type: "function" as const,
+    function: {
+      name: "weather",
+      description:
+        "Previsão do tempo para uma cidade (condição atual, temperatura, sensação, umidade, vento e previsão de 3 dias). API gratuita, sem chave.",
+      parameters: {
+        type: "object",
+        properties: { cidade: { type: "string", description: "Nome da cidade, ex.: São Paulo" } },
+        required: ["cidade"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "currency",
+      description:
+        "Converte um valor entre moedas (ex.: 100 dólares em reais). Suporta códigos (USD, BRL, EUR) e nomes comuns (dólar, real, euro, libra, peso, iene).",
+      parameters: {
+        type: "object",
+        properties: {
+          valor: { type: "string", description: "Quantia, ex.: 100" },
+          de: { type: "string", description: "Moeda de origem, ex.: dólar, USD" },
+          para: { type: "string", description: "Moeda de destino, ex.: real, BRL" },
+        },
+        required: ["valor", "de", "para"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "crypto",
+      description:
+        "Cotação de uma criptomoeda em reais e dólares (bitcoin, ethereum, solana, dogecoin, etc.). API gratuita, sem chave.",
+      parameters: {
+        type: "object",
+        properties: { cripto: { type: "string", description: "Nome da criptomoeda, ex.: bitcoin, ethereum" } },
+        required: ["cripto"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "country",
+      description:
+        "Informações de um país: capital, região, população, moeda e idiomas (ex.: 'capital da França'). API gratuita, sem chave.",
+      parameters: {
+        type: "object",
+        properties: { pais: { type: "string", description: "Nome do país, ex.: França" } },
+        required: ["pais"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "joke",
+      description: "Conta uma piada aleatória em português. API gratuita, sem chave.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "create_folder",
+      description:
+        "Cria uma nova pasta (diretório) no computador. path pode ser absoluto tipo C:/... ou relativo à pasta do usuário, ex.: 'projetos/meuapp'.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Caminho da pasta a criar" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "create_file",
+      description:
+        "Cria um arquivo com conteúdo. path pode ser absoluto ou relativo. Se não disser o conteúdo, use conteúdo vazio.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Caminho do arquivo, ex.: documentos/notas.txt" },
+          conteudo: { type: "string", description: "Conteúdo do arquivo" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "create_project",
+      description:
+        "Cria um projeto novo (pasta com arquivos-base: README.md, etc.) na pasta de projetos do usuário. nome é o nome do projeto.",
+      parameters: {
+        type: "object",
+        properties: {
+          nome: { type: "string", description: "Nome do projeto" },
+          arquivos: { type: "string", description: "Lista de arquivos separados por vírgula" },
+          em: { type: "string", description: "Pasta onde criar (opcional, padrão: projetos)" },
+        },
+        required: ["nome"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_folder",
+      description: "Lista o conteúdo de uma pasta do computador.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Caminho da pasta, ex.: 'projetos' ou 'C:/Windows'" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "open_folder",
+      description: "Abre uma pasta no explorador de arquivos do sistema.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Caminho da pasta" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "delete_path",
+      description: "APAGA permanentemente um arquivo ou pasta do computador. Exige confirmação por voz do usuário antes de executar.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Caminho a apagar" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "rename_path",
+      description: "Renomeia ou move um arquivo ou pasta.",
+      parameters: {
+        type: "object",
+        properties: {
+          origem: { type: "string", description: "Caminho atual" },
+          destino: { type: "string", description: "Novo caminho/nome" },
+        },
+        required: ["origem", "destino"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "web_search",
+      description:
+        "Pesquisa na internet sobre qualquer assunto e devolve os principais resultados com links. Use para perguntas de conhecimento atual, notícias, definições, etc. A consulta deve conter APENAS o assunto — nunca inclua a palavra 'google' ou 'pesquise' (ex.: 'pesquisa no google preço do ps5' → consulta='preço do ps5').",
+      parameters: {
+        type: "object",
+        properties: { consulta: { type: "string", description: "Termo ou pergunta para pesquisar na web (só o assunto, sem 'google') " } },
+        required: ["consulta"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "fetch_url",
+      description: "Acessa uma URL da internet e devolve o título e o texto principal da página. Use para ler artigos e páginas.",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string", description: "URL completa da página, ex.: https://pt.wikipedia.org/wiki/..." } },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "open_url",
+      description: "Abre uma URL no navegador padrão do computador do usuário.",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string", description: "URL a abrir, ex.: https://www.google.com" } },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "open_program",
+      description:
+        "Abre um programa/aplicativo instalado no computador do usuário (ex.: notepad, calculadora, chrome, spotify, vscode, discord, whatsapp).",
+      parameters: {
+        type: "object",
+        properties: { programa: { type: "string", description: "Nome do programa a abrir, ex.: calculadora, chrome" } },
+        required: ["programa"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "send_whatsapp",
+      description:
+        "Envia uma mensagem pelo WhatsApp pela sessão real do whatsapp-web.js (se conectado) ou pelo aplicativo do Windows (nunca no navegador), depois de confirmação por voz do usuário. Use contato (nome salvo na memória, ex.: 'mãe') OU numero (código do país + DDD + número, ex.: 5511999999999).",
+      parameters: {
+        type: "object",
+        properties: {
+          contato: { type: "string", description: "Nome do contato salvo na memória, ex.: mãe, Ana Carolina" },
+          numero: { type: "string", description: "Número do WhatsApp com código do país, ex.: 5511999999999" },
+          mensagem: { type: "string", description: "Texto da mensagem a enviar" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "whatsapp_read",
+      description:
+        "Lê as conversas do WhatsApp pela sessão real: sem argumento, lista as conversas recentes (nome e última mensagem); com 'conversa' (nome ou número), mostra as últimas mensagens daquela conversa. Use para 'leia o whatsapp', 'o que chegou no whatsapp', 'quais as mensagens da mãe'.",
+      parameters: {
+        type: "object",
+        properties: {
+          conversa: { type: "string", description: "Nome do contato ou grupo (ex.: mãe, Família) ou número; vazio = lista as conversas" },
+          limite: { type: "string", description: "Quantas mensagens mostrar, ex.: 10 (padrão 10)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remember",
+      description:
+        "Salva uma informação na memória permanente do assistente (fica salva em arquivo, sobrevive ao desligar o PC). Para contato de WhatsApp use a chave 'contato: NOME' e o número como valor (ex.: chave 'contato: mãe', valor '5511999999999'). Para dados do usuário use a chave 'usuario: campo' (ex.: chave 'usuario: nome', valor 'Raphael'). Qualquer outra chave vira um fato geral.",
+      parameters: {
+        type: "object",
+        properties: {
+          chave: { type: "string", description: "Chave: 'contato: NOME', 'usuario: campo' ou descrição do fato" },
+          valor: { type: "string", description: "Valor a guardar, ex.: o nome, o número ou a informação" },
+        },
+        required: ["chave", "valor"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "forget",
+      description: "Apaga uma informação da memória permanente. Use a mesma chave (ou termo) usado no remember.",
+      parameters: {
+        type: "object",
+        properties: { chave: { type: "string", description: "Chave ou termo da informação a apagar, ex.: 'contato: mãe'" } },
+        required: ["chave"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "add_task",
+      description:
+        "Anota uma tarefa na lista de tarefas do usuário (persistente, fica salva no disco). Use sempre que o usuário pedir para anotar/lembrar de fazer algo, tipo 'adiciona na minha lista de tarefas comprar leite'.",
+      parameters: {
+        type: "object",
+        properties: { tarefa: { type: "string", description: "Descrição da tarefa, ex.: comprar leite" } },
+        required: ["tarefa"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remove_task",
+      description:
+        "Remove uma tarefa da lista de tarefas do usuário. Aceita o número ou o texto da tarefa (correspondência parcial também funciona).",
+      parameters: {
+        type: "object",
+        properties: { tarefa: { type: "string", description: "Texto (ou número) da tarefa a remover, ex.: comprar leite" } },
+        required: ["tarefa"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_tasks",
+      description: "Lista todas as tarefas anotadas na lista de tarefas do usuário.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "add_agenda",
+      description:
+        "Marca um compromisso na agenda/calendário do usuário com data e hora (persistente). O texto completo é interpretado em português: hoje, amanhã, dia da semana, 'dia 15', '15 de agosto', '20/12', 'às 15h', '15h30', 'meio dia', 'da tarde/noite'. Ex.: 'reunião com o time amanhã às 15h no escritório'. Use para 'marca X', 'agenda X para Y', 'compromisso X'.",
+      parameters: {
+        type: "object",
+        properties: {
+          texto: {
+            type: "string",
+            description: "Compromisso completo com data/hora, ex.: 'reunião amanhã às 15h no escritório'",
+          },
+        },
+        required: ["texto"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remove_agenda",
+      description:
+        "Remove um compromisso da agenda do usuário. Aceita o número da lista (ex.: #2), o id ou parte do título (correspondência parcial funciona).",
+      parameters: {
+        type: "object",
+        properties: { filtro: { type: "string", description: "Número, id ou parte do título do compromisso, ex.: reunião" } },
+        required: ["filtro"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_agenda",
+      description:
+        "Lista os compromissos da agenda do usuário. Filtro opcional: 'hoje', 'amanhã', 'semana', um dia da semana (ex.: sexta) ou uma data. Sem filtro, lista os próximos compromissos.",
+      parameters: {
+        type: "object",
+        properties: {
+          quando: { type: "string", description: "Filtro opcional: hoje, amanhã, semana, sexta, 20/12 …" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "convert_units",
+      description:
+        "Converte medidas: comprimento (m, km, cm, mm, polegada, pé, milha), massa (kg, g, tonelada, libra), volume (litro, ml, m3, galão), velocidade (km/h, m/s, mph), tempo (segundo, minuto, hora, dia, semana), dados (kb, mb, gb, tb) e temperatura (celsius, fahrenheit, kelvin). Ex.: '5 quilômetros em metros', '100 graus fahrenheit em celsius'.",
+      parameters: {
+        type: "object",
+        properties: {
+          valor: { type: "string", description: "Quantia, ex.: 5" },
+          de: { type: "string", description: "Unidade de origem, ex.: quilômetros, km, celsius" },
+          para: { type: "string", description: "Unidade de destino, ex.: metros, m, fahrenheit" },
+        },
+        required: ["valor", "de", "para"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "show_image",
+      description:
+        "Encontra uma imagem sobre um assunto e mostra NO PAINEL do HUD (visualizador de imagens). Use SEMPRE que o usuário pedir para VER/MOSTRAR/PESQUISAR/PROCURAR/ACHAR uma imagem ou foto sobre algo (ex.: 'mostra uma imagem de cachorros', 'me mostra uma foto de um carro', 'quero ver uma imagem de energia solar', 'pesquisa uma imagem de X', 'procura a foto de Y'). Devolve a URL da imagem para o HUD exibir — não é para abrir no navegador do sistema e não responda só com o link.",
+      parameters: {
+        type: "object",
+        properties: {
+          assunto: { type: "string", description: "O que a imagem deve mostrar (só o assunto, ex.: cachorros, energia solar)" },
+        },
+        required: ["assunto"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "take_screenshot",
+      description:
+        "Tira um print (captura de tela) da tela inteira do computador, salva como PNG na pasta de imagens (ou na pasta pedida) e abre o arquivo. Ex.: 'tira um print da tela'.",
+      parameters: {
+        type: "object",
+        properties: {
+          salvar: { type: "string", description: "Pasta onde salvar (opcional, padrão: imagens)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "screen_read",
+      description:
+        "Lê o texto visível na tela inteira do computador usando OCR NATIVO do Windows (rápido; fallback local). Útil para saber o que está escrito em um programa, site ou janela aberta. Ex.: 'leia a tela', 'o que está escrito na tela'.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "screen_click",
+      description:
+        "Clica no texto indicado na tela. Se não houver uma leitura recente, captura a tela e lê na hora com OCR local. Use direto para 'veja a tela e clique em X'. Ex.: 'clica em Enviar', 'clica no botão OK'.",
+      parameters: {
+        type: "object",
+        properties: {
+          texto: { type: "string", description: "Texto visível em que devo clicar, ex.: Enviar" },
+          x: { type: "string", description: "Opcional. Coordenada X da tela para clicar direto (sem OCR), ex.: 500" },
+          y: { type: "string", description: "Opcional. Coordenada Y da tela para clicar direto, ex.: 300" },
+          duplo: { type: "string", description: "Opcional. '1' para duplo clique (ex.: abrir ícone do desktop, clicar em botão que exige duplo clique)" },
+        },
+        required: ["texto"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "type_text",
+      description:
+        "Digita texto ou tecla (enter, tab, esc, backspace, setas, f1-f12, ctrl+c, ctrl+v, ctrl+a, alt+tab...) na tela, no campo que estiver focado — ou clica antes em x/y para focar. Textos com acento/emoji usam a área de transferência. Ex.: 'digita olá mundo', 'aperta enter', 'digita preço do ps5 e aperta enter'.",
+      parameters: {
+        type: "object",
+        properties: {
+          texto: { type: "string", description: "Texto a digitar, ex.: olá mundo" },
+          key: { type: "string", description: "Opcional. Tecla a pressionar após digitar: enter, tab, esc, backspace, delete, espaço, setas, f1-f12, ctrl+c, ctrl+v, ctrl+a, ctrl+z, alt+tab" },
+          x: { type: "string", description: "Opcional. Coordenada X para clicar antes (foca o campo), ex.: 500" },
+          y: { type: "string", description: "Opcional. Coordenada Y para clicar antes, ex.: 300" },
+          limpar: { type: "string", description: "Opcional. '1' para limpar o campo antes de digitar (Ctrl+A + Delete)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "screen_ask",
+      description:
+        "Captura a tela e pergunta a um modelo de visão gratuito o que está visível (descreve a tela, responde sobre o que aparece). Sem modelo de visão configurado, cai para OCR. Ex.: 'descreve a tela', 'o que você vê na tela'.",
+      parameters: {
+        type: "object",
+        properties: {
+          pergunta: { type: "string", description: "Pergunta sobre a tela, ex.: Descreva o que está visível na tela" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_windows",
+      description:
+        "Lista as janelas abertas no Windows (programa + título). Use para saber o que está aberto antes de alternar/maximizar/fechar uma janela. Ex.: 'quais janelas estão abertas'.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "window_control",
+      description:
+        "Controla uma janela do Windows: maximizar, minimizar, restaurar, fechar ou ativar/alternar (traz para a frente). janela aceita nome comum (chrome, word, excel, notepad, vscode, whatsapp...) ou trecho do título. Ex.: 'maximiza a janela do chrome', 'fecha a janela do word', 'alterna para o vscode', 'minimiza a calculadora'.",
+      parameters: {
+        type: "object",
+        properties: {
+          acao: { type: "string", description: "Ação: maximizar, minimizar, restaurar, fechar ou ativar (alternar)" },
+          janela: { type: "string", description: "Programa ou trecho do título da janela, ex.: chrome, word, vscode" },
+        },
+        required: ["acao", "janela"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "open_instagram",
+      description: "Abre o perfil de um usuário no Instagram usando o nome de usuário (sem @).",
+      parameters: {
+        type: "object",
+        properties: { usuario: { type: "string", description: "Nome de usuário do Instagram, ex.: sagartamang" } },
+        required: ["usuario"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "social_search",
+      description:
+        "Pesquisa um perfil, pessoa ou assunto em uma rede social específica. rede pode ser: youtube, tiktok, x (ou twitter), instagram, facebook, linkedin, github, google. A consulta deve conter APENAS o assunto, sem o nome da rede (ex.: 'pesquisa no google preço do ps5' → rede='google', consulta='preço do ps5').",
+      parameters: {
+        type: "object",
+        properties: {
+          rede: { type: "string", description: "Rede social para pesquisar: youtube, tiktok, x, instagram, facebook, linkedin, github ou google" },
+          consulta: { type: "string", description: "Nome/perfil/assunto a pesquisar (só o assunto, sem o nome da rede)" },
+          direto: {
+            type: "string",
+            description:
+              "'1' quando o usuário quiser TOCAR/ver um vídeo específico: youtube (ex.: 'toca a música X', 'toca X no youtube'), tiktok (ex.: 'toca um vídeo do tiktok sobre Y', rede='tiktok') ou instagram/reels (ex.: 'assiste um reels sobre Z', rede='instagram') — abre o primeiro resultado direto no player em vez da busca.",
+          },
+        },
+        required: ["rede", "consulta"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_file",
+      description:
+        "Lê o conteúdo de um arquivo com números de linha (limite de 120 linhas; use 'linhas' para ver um trecho, ex.: 40-80). Use ANTES de editar para ver o código atual. Caminhos relativos são resolvidos no projeto atual (veja 'define o projeto atual').",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Caminho do arquivo, relativo ao projeto atual ou absoluto, ex.: src/index.ts" },
+          linhas: { type: "string", description: "Opcional. Faixa de linhas, ex.: 40-80" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "edit_file",
+      description:
+        "Edita um arquivo substituindo um trecho EXATO por outro (patch por texto). O 'de' precisa casar byte a byte (espaços e acentos contam); use um fragmento único e curto. Passando 'todas', substitui todas as ocorrências. Use read_file antes para ver o conteúdo.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Caminho do arquivo, relativo ao projeto atual ou absoluto" },
+          de: { type: "string", description: "Trecho exato a localizar (obrigatório)" },
+          para: { type: "string", description: "Texto substituto (pode ser vazio para apagar)" },
+          todas: { type: "string", description: "Opcional: true para substituir todas as ocorrências" },
+        },
+        required: ["path", "de"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "add_transaction",
+      description:
+        "Registra um lançamento financeiro: receita (dinheiro que entrou: salário, ganhei, recebi) ou despesa (dinheiro que saiu: gastei, paguei, comprei, custou). Categorias comuns: alimentação, transporte, moradia, lazer, saúde, educação, salário, outros. Use quando o usuário disser algo como 'adiciona despesa de 50 reais em alimentação' ou 'ganhei 2000 de salário'.",
+      parameters: {
+        type: "object",
+        properties: {
+          tipo: { type: "string", description: "receita ou despesa" },
+          valor: { type: "string", description: "Valor em reais, ex.: 50.90" },
+          categoria: { type: "string", description: "Ex.: alimentação, transporte, salário" },
+          descricao: { type: "string", description: "Opcional: detalhe do que foi" },
+        },
+        required: ["tipo", "valor", "categoria"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "remove_transaction",
+      description: "Remove um lançamento financeiro pelo id, pelo número visível na lista (ex.: #1) ou por parte da descrição.",
+      parameters: {
+        type: "object",
+        properties: {
+          ref: { type: "string", description: "Ex.: #1 ou o id ou parte da descrição" },
+        },
+        required: ["ref"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_transactions",
+      description: "Lista os últimos lançamentos financeiros (número, tipo, valor, categoria, data).",
+      parameters: {
+        type: "object",
+        properties: {
+          limite: { type: "string", description: "Opcional: quantos mostrar (padrão 10, máx 50)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "finance_summary",
+      description:
+        "Resumo financeiro: saldo total, receitas e despesas do mês atual e as maiores categorias de gasto do mês. Use quando o usuário perguntar saldo, quanto gastei, quanto tenho, resumo financeiro, para onde está indo meu dinheiro.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "ver_novidades",
+      description:
+        "Novidades das últimas atualizações instaladas no ARES (changelog em linguagem simples, sem nome de versão). Use quando o usuário perguntar 'o que há de novo', 'o que veio na atualização', 'o que mudou no programa', 'quais foram as novidades'. A resposta deve ser dita de forma simples e amigável.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+] as const;
