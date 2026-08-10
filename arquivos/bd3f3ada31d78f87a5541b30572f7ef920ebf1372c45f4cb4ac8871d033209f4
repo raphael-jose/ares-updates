@@ -1,0 +1,121 @@
+/**
+ * Feedback de usuários (sugestões do que melhorar/implementar).
+ *
+ * - O USUÁRIO envia pela janela REGISTRO DE AÇÕES (textarea + botão). O POST
+ *   /api/feedback publica no MQTT (`ares/v1/feedback` — mesmo caminho da
+ *   telemetria de erros, best-effort).
+ * - O DEV recebe: assina o tópico no boot (máquina com ARES_ERROS_RECEBER=1
+ *   ou ARES_DEV_MODE=1), persiste em `~/.ares/feedback.json` e a janela dele
+ *   mostra a seção FEEDBACK RECEBIDO.
+ */
+import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
+import path from "path";
+import { publicarFeedback, registrarReceptorFeedback, type FeedbackRecebido } from "./errosMqtt";
+
+export interface FeedbackItem {
+  id: number;
+  de: string;
+  hora: string;
+  iso: string;
+  texto: string;
+}
+
+const DIR = path.join(os.homedir(), ".ares");
+const FILE = path.join(DIR, "feedback.json");
+const MAX = 200;
+
+let cache: FeedbackItem[] | null = null;
+let writeQueue: Promise<void> = Promise.resolve();
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function horaDe(iso: string): string {
+  return new Date(iso).toLocaleTimeString("pt-BR", { hour12: false });
+}
+
+function ensureLoaded(): FeedbackItem[] {
+  if (cache) return cache;
+  try {
+    if (fs.existsSync(FILE)) {
+      const raw = JSON.parse(fs.readFileSync(FILE, "utf8")) as unknown;
+      cache = Array.isArray(raw)
+        ? (raw as FeedbackItem[]).filter((f) => f && typeof f.texto === "string").slice(0, MAX)
+        : [];
+    } else {
+      cache = [];
+    }
+  } catch {
+    cache = [];
+  }
+  return cache;
+}
+
+function scheduleSave(): void {
+  const data = cache ?? [];
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(DIR, { recursive: true });
+      await fsp.writeFile(FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch {
+      /* best-effort */
+    }
+  });
+}
+
+function inserir(item: FeedbackItem): void {
+  const data = ensureLoaded();
+  data.unshift(item);
+  if (data.length > MAX) data.length = MAX;
+  scheduleSave();
+}
+
+/** Envia um feedback do usuário (publica no MQTT — best-effort). */
+export function enviarFeedback(texto: string): void {
+  try {
+    publicarFeedback({
+      hora: horaDe(nowIso()),
+      texto,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Feedback recebido pelo dev (mais recentes primeiro). */
+export function listarFeedback(limite = 100): FeedbackItem[] {
+  return ensureLoaded().slice(0, limite);
+}
+
+/** Limpa a lista de feedback recebido (só o dev). */
+export function limparFeedback(): { ok: boolean; message: string } {
+  cache = [];
+  scheduleSave();
+  return { ok: true, message: "Feedback recebido limpo." };
+}
+
+/** Liga a recepção no boot: feedback remoto chega e é persistido. */
+export function ativarFeedback(): void {
+  try {
+    registrarReceptorFeedback((f: FeedbackRecebido) => {
+      const iso = new Date(f.ts ?? Date.now()).toISOString();
+      inserir({
+        id: (f.ts ?? Date.now()) * 100 + Math.floor(Math.random() * 90),
+        de: f.de,
+        hora: f.hora || horaDe(iso),
+        iso,
+        texto: f.texto,
+      });
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Versão enxuta para testes: limpa o cache em memória. */
+export function __resetFeedbackCache(): void {
+  cache = null;
+}
