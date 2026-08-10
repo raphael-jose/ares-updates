@@ -1,0 +1,215 @@
+"use client";
+
+/**
+ * rPPG — Photoplethysmografia remota (BPM pela câmera).
+ *
+ * Estima os batimentos cardíacos a partir das variações sutis de cor da pele
+ * (o canal verde é o mais sensível à hemoglobina). 100% client-side, sem
+ * servidor e sem dependências: apenas um canvas 64×64, FFT própria e um filtro
+ * de banda para a faixa de pulso humano (45–240 BPM).
+ */
+
+export type RppgStatus = "idle" | "running";
+
+export interface RppgCallbacks {
+  onBpm(bpm: number | null): void;
+  onStatus?(status: RppgStatus): void;
+}
+
+const BUFFER_SIZE = 256; // amostras retidas (≈ 8s a 30fps)
+const MIN_SAMPLES = 90; // mínimo para estimar (≈ 3s de sinal)
+const ESTIMATE_INTERVAL_MS = 1000;
+const MIN_BPM = 45;
+const MAX_BPM = 210;
+
+/** FFT radix-2 in-place (tamanho precisa ser potência de 2). */
+function fft(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i];
+      re[i] = re[j];
+      re[j] = tr;
+      const ti = im[i];
+      im[i] = im[j];
+      im[j] = ti;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wRe = Math.cos(ang);
+    const wIm = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1;
+      let curIm = 0;
+      const half = len / 2;
+      for (let j = 0; j < half; j++) {
+        const uRe = re[i + j];
+        const uIm = im[i + j];
+        const vRe = re[i + j + half] * curRe - im[i + j + half] * curIm;
+        const vIm = re[i + j + half] * curIm + im[i + j + half] * curRe;
+        re[i + j] = uRe + vRe;
+        im[i + j] = uIm + vIm;
+        re[i + j + half] = uRe - vRe;
+        im[i + j + half] = uIm - vIm;
+        const nRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = nRe;
+      }
+    }
+  }
+}
+
+function nextPow2(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+/** Estima o BPM dominante na faixa de pulso humano usando FFT + janela de Hann. */
+function estimateBpm(samples: number[], fps: number): number | null {
+  const n = samples.length;
+  if (n < MIN_SAMPLES || !Number.isFinite(fps) || fps <= 0) return null;
+  const N = nextPow2(n);
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  const mean = samples.reduce((a, b) => a + b, 0) / n;
+  for (let i = 0; i < n; i++) {
+    const win = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+    re[i] = (samples[i] - mean) * win;
+  }
+  fft(re, im);
+
+  const kMin = Math.max(1, Math.floor((MIN_BPM / 60 / fps) * N));
+  const kMax = Math.min(N / 2 - 1, Math.ceil((MAX_BPM / 60 / fps) * N));
+  let bestK = -1;
+  let bestPower = -1;
+  for (let k = kMin; k <= kMax; k++) {
+    const power = re[k] * re[k] + im[k] * im[k];
+    if (power > bestPower) {
+      bestPower = power;
+      bestK = k;
+    }
+  }
+  if (bestK < 0) return null;
+  const bpm = Math.round((bestK * fps * 60) / N);
+  if (bpm < MIN_BPM || bpm > MAX_BPM) return null;
+  return bpm;
+}
+
+/** Mediana (estabiliza a estimativa contra picos isolados). */
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+export class RppgMonitor {
+  private video: HTMLVideoElement;
+  private callbacks: RppgCallbacks;
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private samples: number[] = [];
+  private times: number[] = [];
+  private rafId = 0;
+  private running = false;
+  private lastEstimateAt = 0;
+  private status: RppgStatus = "idle";
+  private recentBpm: number[] = [];
+
+  constructor(video: HTMLVideoElement, callbacks: RppgCallbacks) {
+    this.video = video;
+    this.callbacks = callbacks;
+    this.canvas = document.createElement("canvas");
+    this.canvas.width = 64;
+    this.canvas.height = 64;
+    const ctx = this.canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("canvas 2d indisponível");
+    this.ctx = ctx;
+  }
+
+  getStatus(): RppgStatus {
+    return this.status;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.samples = [];
+    this.times = [];
+    this.recentBpm = [];
+    this.lastEstimateAt = 0;
+    this.setStatus("running");
+    this.rafId = requestAnimationFrame(this.loop);
+  }
+
+  stop(): void {
+    if (!this.running) return;
+    this.running = false;
+    cancelAnimationFrame(this.rafId);
+    this.setStatus("idle");
+    this.callbacks.onBpm(null);
+  }
+
+  private setStatus(s: RppgStatus): void {
+    if (this.status === s) return;
+    this.status = s;
+    this.callbacks.onStatus?.(s);
+  }
+
+  /** Lê o verde médio da região central do frame (onde costuma ficar o rosto). */
+  private sampleGreen(): number {
+    try {
+      // Vídeo ainda sem frame decodificado: drawImage lançaria e mataria o loop
+      if (this.video.readyState < 2) return 0;
+      this.ctx.drawImage(this.video, 0, 0, 64, 64);
+      const { data } = this.ctx.getImageData(16, 16, 32, 32);
+      let g = 0;
+      let count = 0;
+      for (let i = 1; i < data.length; i += 4) {
+        g += data[i];
+        count++;
+      }
+      return count ? g / count : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private loop = (): void => {
+    if (!this.running) return;
+    this.rafId = requestAnimationFrame(this.loop);
+
+    const now = performance.now();
+    this.samples.push(this.sampleGreen());
+    this.times.push(now);
+    if (this.samples.length > BUFFER_SIZE) {
+      this.samples.shift();
+      this.times.shift();
+    }
+
+    if (now - this.lastEstimateAt < ESTIMATE_INTERVAL_MS) return;
+    this.lastEstimateAt = now;
+
+    const n = this.times.length;
+    if (n < MIN_SAMPLES) return;
+    const fps = ((n - 1) / (this.times[n - 1] - this.times[0])) * 1000;
+    const bpm = estimateBpm(this.samples, fps);
+    if (bpm === null) return;
+
+    this.recentBpm.push(bpm);
+    if (this.recentBpm.length > 5) this.recentBpm.shift();
+    const stable = median(this.recentBpm);
+    const last = this.callbacksLastBpm ?? -1;
+    if (Math.abs(stable - last) >= 2 || last < 0) {
+      this.callbacksLastBpm = stable;
+      this.callbacks.onBpm(stable);
+    }
+  };
+
+  /** Último BPM reportado (evita spam no callback). */
+  private callbacksLastBpm: number | null = null;
+}
