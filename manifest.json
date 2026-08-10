@@ -1,9 +1,10 @@
 {
-  "versao": "20260810-162855",
+  "versao": "20260810-164422",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: correcao de estabilidade - convites simultaneos nao travam mais (desempate deterministico em vez de deadlock de 30s) e conexoes duplicadas para o mesmo contato sao fechadas automaticamente (fim do loop canal-fechado-reconexao que perdia mensagens)."
+    "Chat P2P: correcao da criptografia - o AAD do AES-GCM no recebimento usava a fingerprint errada e descartava TODAS as mensagens em silencio (envio funcionava, chegada nao). Agora os dois lados computam o mesmo AAD e toda mensagem entrega.",
+    "Chat P2P: fim da corrida de canais - o connId agora e trocado pela sinalizacao (antes do canal existir), entao so um lado cria o canal na reconexao - sem loop de canais se fechando e sem perder mensagens."
   ],
   "arquivos": [
     {
@@ -228,8 +229,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/b99e9ffb1922436e2c2858c0d5525e028a564f0808eb37c658aa2c98c4aef42c",
-      "sha256": "b99e9ffb1922436e2c2858c0d5525e028a564f0808eb37c658aa2c98c4aef42c"
+      "url": "arquivos/14aa614c83bd6e354e6a1f689ecf2c1aec5b6679113cd1dad10ef5a2ea710de2",
+      "sha256": "14aa614c83bd6e354e6a1f689ecf2c1aec5b6679113cd1dad10ef5a2ea710de2"
     },
     {
       "caminho": "lib/agent/project.ts",
