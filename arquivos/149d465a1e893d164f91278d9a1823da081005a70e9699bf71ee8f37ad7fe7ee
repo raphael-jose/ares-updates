@@ -1,0 +1,351 @@
+#!/usr/bin/env node
+/**
+ * ARES CLI — vibe coding por terminal.
+ *
+ * Usa o MESMO pipeline do ARES (lib/agent/index.ts → processCommand), sem voz
+ * nem TTS: o que você digita aqui é exatamente o que você falaria no HUD.
+ *
+ * Modelo:
+ * - KIWI_OLLAMA_API_KEY definida → deepseek-v4-flash:cloud (Ollama Cloud)
+ * - KIWI_CLOUD_URL + KIWI_CLOUD_KEY + KIWI_CLOUD_MODEL → API OpenAI-compatível
+ * - nenhuma das duas → llama3.1 local (Ollama em http://localhost:11434)
+ *
+ * Para isolar o histórico desta CLI do histórico do app web:
+ *   ARES_CONVERSATION_FILE=/tmp/conv.json npm run ares
+ */
+import { createInterface } from "node:readline";
+import { processCommand, confirmCommand } from "../lib/agent/index";
+import { getCurrentProject } from "../lib/agent/project";
+import { clearConversation } from "../lib/agent/conversation";
+import type { AgentResult } from "../lib/agent/types";
+
+// ——— Cores (só quando o stdout é um terminal) ———
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  yellow: "\x1b[33m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+};
+const useColor = process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
+const c = (code: string, s: string) => (useColor ? `${code}${s}${ANSI.reset}` : s);
+
+const BANNER = `
+   █████╗ ██████╗ ███████╗ ███████╗
+  ██╔══██╗██╔══██╗██╔════╝ ██╔════╝
+  ███████║██████╔╝█████╗   ███████╗
+  ██╔══██║██╔══██╗██╔══╝   ╚════██║
+  ██║  ██║██║  ██║███████╗ ███████║
+  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ╚══════╝`;
+
+const HELP = `
+Comandos da CLI:
+  /ajuda          mostra esta ajuda
+  /modelo         mostra o modelo/fornecedor ativo
+  /projeto        mostra o projeto atual (modo coding)
+  /nova           apaga o histórico da conversa
+  /limpar         limpa a tela
+  /sair           sai da CLI (ou: sair, exit, Ctrl+C)
+
+Qualquer outra linha vai direto para a Arthemis (ex.: "oi", "cria um arquivo
+chamado notas.txt", "define o projeto atual como C:/pasta", "roda npm test").
+`;
+
+// ——— Diagnóstico do modelo no boot ———
+interface ModelStatus {
+  provider: string;
+  model: string;
+  ok: boolean;
+  note?: string;
+}
+
+async function checkModel(): Promise<ModelStatus> {
+  const key = process.env.KIWI_OLLAMA_API_KEY?.trim();
+  if (key) {
+    return {
+      provider: "Ollama Cloud",
+      model: process.env.KIWI_OLLAMA_MODEL?.trim() || "deepseek-v4-flash:cloud",
+      ok: true,
+    };
+  }
+  const cloudUrl = process.env.KIWI_CLOUD_URL?.trim();
+  if (cloudUrl && process.env.KIWI_CLOUD_KEY?.trim() && process.env.KIWI_CLOUD_MODEL?.trim()) {
+    return {
+      provider: "API OpenAI-compatível",
+      model: process.env.KIWI_CLOUD_MODEL?.trim() || "",
+      ok: true,
+    };
+  }
+  // Ollama local (health-check rápido para avisar se está offline);
+  // respeita KIWI_OLLAMA_URL caso o usuário aponte outro endpoint
+  const ollamaBase = (process.env.KIWI_OLLAMA_URL ?? "http://localhost:11434").trim();
+  try {
+    const res = await fetch(`${ollamaBase.replace(/\/$/, "")}/api/tags`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      return {
+        provider: "Ollama local",
+        model: process.env.KIWI_OLLAMA_MODEL?.trim() || "llama3.1",
+        ok: true,
+      };
+    }
+    return { provider: "Ollama local", model: "llama3.1", ok: false, note: "sem resposta" };
+  } catch {
+    return { provider: "Ollama local", model: "llama3.1", ok: false, note: "offline" };
+  }
+}
+
+// ——— Spinner simples (stderr, para não poluir o stdout) ———
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+let spinnerTimer: NodeJS.Timeout | null = null;
+let spinnerIdx = 0;
+
+function startSpinner(): void {
+  if (!useColor) return;
+  spinnerIdx = 0;
+  process.stderr.write("\x1b[?25l");
+  spinnerTimer = setInterval(() => {
+    process.stderr.write(
+      `\r\x1b[K${c(ANSI.dim, `${SPINNER[spinnerIdx++ % SPINNER.length]} pensando…`)}`,
+    );
+  }, 80);
+}
+
+function stopSpinner(): void {
+  if (spinnerTimer) {
+    clearInterval(spinnerTimer);
+    spinnerTimer = null;
+  }
+  if (useColor) process.stderr.write("\r\x1b[K\x1b[?25h");
+}
+
+// ——— Saída ———
+function printResult(res: AgentResult): void {
+  if (res.log) {
+    const ok = res.log.ok;
+    console.log(c(ANSI.dim, `  [${res.log.time}] ${ok ? "✓" : "✗"} ${res.log.text}`));
+  }
+  if (res.reply) {
+    console.log(c(ANSI.yellow, `Arthemis: ${res.reply}`));
+  }
+  if (res.sugestoes && res.sugestoes.length > 0) {
+    res.sugestoes.forEach((s, i) => console.log(c(ANSI.green, `  ${i + 1}) ${s}`)));
+  }
+}
+
+// ——— Fila serializada: nunca processa duas linhas ao mesmo tempo ———
+let queue: Promise<void> = Promise.resolve();
+let closed = false;
+
+function enqueue(fn: () => Promise<void>): void {
+  queue = queue.then(fn).catch(() => {});
+}
+
+// Saída: fecha o readline (libera o stdin) e deixa o event loop esvaziar sozinho.
+// Evita o crash do libuv no Windows ao chamar process.exit() com leitura pendente.
+let exiting = false;
+
+function exitCli(): void {
+  if (exiting) return;
+  exiting = true;
+  closed = true;
+  stopSpinner();
+  if (process.stdin.isTTY) console.log(c(ANSI.dim, "Até mais!"));
+  rl?.close();
+  rl = null;
+}
+
+// Confirmação pendente: vira uma fase da fila (a resposta é a próxima linha)
+interface ConfirmPhase {
+  token: string;
+  action: string;
+}
+let confirmPhase: ConfirmPhase | null = null;
+
+const CONFIRM_YES = /^(sim|s|yes|ok|pode|claro|confirmo|vai|pode apagar)\b/i;
+
+function printConfirmQuestion(action: string): void {
+  console.log(c(ANSI.red, `  ⚠ ${action}`));
+  process.stdout.write(c(ANSI.yellow, "  Confirmar? (sim/não) "));
+}
+
+function resolveConfirm(answer: string): void {
+  if (!confirmPhase) return;
+  const cp = confirmPhase;
+  confirmPhase = null;
+  enqueue(async () => {
+    if (CONFIRM_YES.test(answer.trim())) {
+      const confirmed = await confirmCommand(cp.token);
+      printResult(confirmed);
+    } else {
+      console.log(c(ANSI.yellow, "  ↳ Cancelado."));
+    }
+  });
+}
+
+async function run(text: string): Promise<void> {
+  if (useColor) startSpinner();
+  try {
+    console.log(c(ANSI.dim, `» você: ${text}`));
+    const res = await processCommand(text);
+    stopSpinner();
+    printResult(res);
+    if (res.needsConfirmation) {
+      confirmPhase = {
+        token: res.needsConfirmation.token,
+        action: res.needsConfirmation.action,
+      };
+      if (process.stdin.isTTY) {
+        printConfirmQuestion(res.needsConfirmation.action);
+      } else {
+        // Sem terminal interativo: nunca confirma sozinho — segurança por padrão.
+        confirmPhase = null;
+        console.log(c(ANSI.dim, "  ↳ Terminal não interativo: confirmação cancelada automaticamente."));
+      }
+    }
+  } catch (err) {
+    stopSpinner();
+    console.log(c(ANSI.red, `  ERRO: ${err instanceof Error ? err.message : String(err)}`));
+  } finally {
+    maybePrompt();
+  }
+}
+
+// ——— Comandos internos ———
+function handleMeta(line: string, model: ModelStatus): void {
+  const cmd = line.toLowerCase();
+  if (cmd === "/ajuda" || cmd === "/help" || cmd === "/?") {
+    console.log(HELP.trim());
+    return;
+  }
+  if (cmd === "/modelo") {
+    console.log(
+      model.ok
+        ? c(ANSI.green, `Modelo ativo: ${model.model} (${model.provider})`)
+        : c(
+            ANSI.yellow,
+            `Modelo: ${model.model} (${model.provider}) — ${model.note ?? "não respondeu"}`,
+          ),
+    );
+    if (!model.ok) {
+      console.log(
+        c(
+          ANSI.dim,
+          "  Dica: defina KIWI_OLLAMA_API_KEY para usar deepseek-v4-flash:cloud, ou inicie o Ollama local.",
+        ),
+      );
+    }
+    return;
+  }
+  if (cmd === "/projeto") {
+    const proj = getCurrentProject();
+    console.log(
+      proj
+        ? c(ANSI.cyan, `Projeto atual: ${proj}`)
+        : c(ANSI.dim, "Nenhum projeto atual. Diga: define o projeto atual como C:/pasta"),
+    );
+    return;
+  }
+  if (cmd === "/nova") {
+    clearConversation();
+    console.log(c(ANSI.green, "Histórico da conversa apagado."));
+    return;
+  }
+  if (cmd === "/limpar") {
+    if (useColor) process.stdout.write("\x1b[2J\x1b[H");
+    return;
+  }
+  console.log(c(ANSI.yellow, `Comando desconhecido: ${line} (use /ajuda)`));
+}
+
+// ——— Boot: só depois dele o REPL começa (evita corrida com o health-check) ———
+let bootModel: ModelStatus = { provider: "—", model: "—", ok: false, note: "verificando…" };
+let rl: ReturnType<typeof createInterface> | null = null;
+let booted = false;
+
+function maybePrompt(): void {
+  if (booted && process.stdin.isTTY && !closed) rl?.prompt();
+}
+
+async function main(): Promise<void> {
+  console.log(c(ANSI.cyan, BANNER));
+  console.log(c(ANSI.bold, "ARES — vibe coding por terminal · mesmo pipeline do HUD, sem voz/TTS"));
+  bootModel = await checkModel();
+  console.log(
+    bootModel.ok
+      ? c(ANSI.green, `  Modelo: ${bootModel.model} (${bootModel.provider})`)
+      : c(
+          ANSI.yellow,
+          `  Modelo: ${bootModel.model} (${bootModel.provider}) — ${bootModel.note ?? "indisponível"}. Comandos simples funcionam; perguntas livres cairão em resposta genérica.`,
+        ),
+  );
+  const proj = getCurrentProject();
+  if (proj) console.log(c(ANSI.cyan, `  Projeto atual: ${proj}`));
+  console.log(c(ANSI.dim, "  Digite /ajuda para os comandos da CLI."));
+  startRepl();
+}
+
+// ——— Eventos (iniciados após o boot) ———
+const EXIT_WORDS = /^(?:\/sair|\/quit|\/exit|sair|exit|quit)$/i;
+
+function startRepl(): void {
+  booted = true;
+  const r = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY === true,
+  });
+  rl = r;
+
+  if (process.stdin.isTTY) r.setPrompt(c(ANSI.cyan, "você> "));
+
+  r.on("line", (raw) => {
+    const line = raw.trim();
+    // Sair tem prioridade até durante a confirmação (não vira resposta “não”)
+    if (EXIT_WORDS.test(line)) {
+      confirmPhase = null;
+      exitCli();
+      return;
+    }
+    // Fase de confirmação: a próxima linha é a resposta (sim/não)
+    if (confirmPhase) {
+      resolveConfirm(line);
+      return;
+    }
+    if (!line) {
+      maybePrompt();
+      return;
+    }
+    if (line.startsWith("/")) {
+      // Vai pela fila também: em modo piped os comandos `/` não furam a ordem
+      enqueue(async () => handleMeta(line, bootModel));
+      return;
+    }
+    enqueue(() => run(line));
+  });
+
+  r.on("SIGINT", () => {
+    if (!closed) {
+      closed = true;
+      exiting = true;
+      stopSpinner();
+      console.log("");
+      r.close();
+      rl = null;
+      // Fecha o readline antes de sair para não deixar leitura pendente no Windows
+      process.exit(0);
+    }
+  });
+
+  r.on("close", () => {
+    closed = true;
+    if (!exiting) exitCli();
+  });
+
+  maybePrompt();
+}
+
+void main();
