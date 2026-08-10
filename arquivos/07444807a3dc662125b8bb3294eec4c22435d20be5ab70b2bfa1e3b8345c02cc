@@ -1,0 +1,53 @@
+import { NextResponse } from "next/server";
+import {
+  getSettings,
+  salvarSettings,
+  resumoConfiguracoes,
+  idInstalacaoSettings,
+  type PatchConfiguracoes,
+} from "@/lib/agent/settings";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const runtime = "nodejs";
+
+/**
+ * Configurações do app (menu CONFIGURAÇÕES da interface).
+ *   GET  /api/settings        → { config, sistema } (config + info do sistema)
+ *   POST /api/settings {patch} → salva um patch validado no ~/.ares/settings.json
+ */
+export async function GET() {
+  const config = getSettings();
+  let versao = "";
+  try {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version?: string };
+    versao = pkg.version ?? "";
+  } catch {
+    /* sem package.json */
+  }
+  return NextResponse.json({
+    config,
+    sistema: {
+      devMode: process.env.ARES_DEV_MODE === "1",
+      instalacaoId: idInstalacaoSettings(),
+      versao,
+      feedUrl: (process.env.ARES_UPDATE_URL || "").trim(),
+      broker: (process.env.ARES_MQTT_URL || "").trim() || "wss://broker.hivemq.com:8884/mqtt",
+    },
+  });
+}
+
+export async function POST(req: Request) {
+  let patch: PatchConfiguracoes = {};
+  try {
+    const b = (await req.json()) as { patch?: unknown };
+    if (b?.patch && typeof b.patch === "object") patch = b.patch as PatchConfiguracoes;
+  } catch {
+    /* corpo ausente/inválido */
+  }
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ ok: false, message: "Nada para salvar." }, { status: 400 });
+  }
+  const config = salvarSettings(patch);
+  return NextResponse.json({ ok: true, config, resumo: resumoConfiguracoes(config) });
+}
