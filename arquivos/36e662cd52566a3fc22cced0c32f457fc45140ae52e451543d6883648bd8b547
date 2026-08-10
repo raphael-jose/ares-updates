@@ -1,0 +1,39 @@
+export interface OrbPalette {
+  bright: number;
+  mid: number;
+  dim: number;
+  faint: number;
+  hot: number;
+  /** Intervalos RGB para os textos flutuantes do orbe. */
+  textR: [number, number];
+  textG: [number, number];
+  textB: [number, number];
+  /** Stops do gradiente de poeira. */
+  dust: [string, string, string, string];
+  /** Multiplicador RGB do color grade final (chromatic push). */
+  push: [number, number, number];
+}
+
+/**
+ * Paleta preto e branco (identidade visual da Arthemis): brancos e cinzas
+ * sobre fundo preto, com color grade neutro.
+ */
+const B_W: OrbPalette = {
+  bright: 0xffffff,
+  mid: 0xd0d0d0,
+  dim: 0x8a8a8a,
+  faint: 0x505050,
+  hot: 0xffffff,
+  textR: [235, 255],
+  textG: [235, 255],
+  textB: [235, 255],
+  dust: [
+    "rgba(255,255,255,1)",
+    "rgba(220,220,220,0.6)",
+    "rgba(150,150,150,0.15)",
+    "rgba(70,70,70,0)",
+  ],
+  push: [1, 1, 1],
+};
+
+export const ORB_PALETTES: OrbPalette = B_W;
