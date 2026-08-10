@@ -1,12 +1,13 @@
 {
-  "versao": "20260809-235932",
+  "versao": "20260810-002835",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Janela de loading mais leve e bonita",
-    "Launcher novo: arthemis.bat",
-    "Atualizacoes cumulativas (usuarios atrasados nao quebram mais)",
-    "Notas de versao exibidas apos instalar"
+    "Correcao: letras pretas ilegiveis nas janelas (agora brancas)",
+    "Correcao: texto de modo dev removido do painel do usuario",
+    "Novo: erros dos usuarios chegam para o dev (telemetria MQTT)",
+    "Correcao: voz neural volta a funcionar nos PCs (python/py/python3)",
+    "Launcher arthemis.bat mais robusto (porta livre + logs)"
   ],
   "arquivos": [
     {
@@ -71,8 +72,8 @@
     },
     {
       "caminho": "app/api/tts/route.ts",
-      "url": "arquivos/a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101",
-      "sha256": "a33dd6a0ec9cdb8056d6610b6aeacc4c633f4545fc8309d2efc2524b4ccd9101"
+      "url": "arquivos/c21ef8920154acefaad16012a266368475831060766d16d77b9bbdf6a29a2364",
+      "sha256": "c21ef8920154acefaad16012a266368475831060766d16d77b9bbdf6a29a2364"
     },
     {
       "caminho": "app/api/turn/route.ts",
@@ -91,8 +92,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/3171668a4f8393c3d342bc503b6e9ca7372ac3e51b5b9a0d32c504f03c581ced",
-      "sha256": "3171668a4f8393c3d342bc503b6e9ca7372ac3e51b5b9a0d32c504f03c581ced"
+      "url": "arquivos/9ad069f8a0d3189f0b0880a94d977bbf1a11768fbd8725a763f2adea995dad90",
+      "sha256": "9ad069f8a0d3189f0b0880a94d977bbf1a11768fbd8725a763f2adea995dad90"
     },
     {
       "caminho": "app/icon.svg",
@@ -111,8 +112,8 @@
     },
     {
       "caminho": "arthemis.bat",
-      "url": "arquivos/5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e",
-      "sha256": "5b4234af4fe7be79957e6744f4179ecd9a4ef03a42f764642c137b9ef2040a7e"
+      "url": "arquivos/582e02ad412f4c6af9ecdf3ed37bc18e7de3f6907d40ddd6215eabb329866a2a",
+      "sha256": "582e02ad412f4c6af9ecdf3ed37bc18e7de3f6907d40ddd6215eabb329866a2a"
     },
     {
       "caminho": "COMANDOS.md",
@@ -121,13 +122,13 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/8bb6b62b9d8bd39ece06a7cec7200816c5a1158a69c486112f46423150493a36",
-      "sha256": "8bb6b62b9d8bd39ece06a7cec7200816c5a1158a69c486112f46423150493a36"
+      "url": "arquivos/226cb36aa13f7567f8fb5709542f02f7bfc656e83617472e1a1ac3d8256339fb",
+      "sha256": "226cb36aa13f7567f8fb5709542f02f7bfc656e83617472e1a1ac3d8256339fb"
     },
     {
       "caminho": "instrumentation.ts",
-      "url": "arquivos/89337a99ee8119961a26f380c36a6395b3978f1979e19c22744d8b61c937ae76",
-      "sha256": "89337a99ee8119961a26f380c36a6395b3978f1979e19c22744d8b61c937ae76"
+      "url": "arquivos/b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7",
+      "sha256": "b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7"
     },
     {
       "caminho": "lib/agent/builtin.ts",
@@ -146,8 +147,13 @@
     },
     {
       "caminho": "lib/agent/erros.ts",
-      "url": "arquivos/103942622ef4704f14ee4ee447402c050860b4613455bf017fabc1322ba212cf",
-      "sha256": "103942622ef4704f14ee4ee447402c050860b4613455bf017fabc1322ba212cf"
+      "url": "arquivos/3199f856528820001baa6282771ca12d7b77042192273314bad6e1ce617eb6cc",
+      "sha256": "3199f856528820001baa6282771ca12d7b77042192273314bad6e1ce617eb6cc"
+    },
+    {
+      "caminho": "lib/agent/errosMqtt.ts",
+      "url": "arquivos/e0fdd388d48b16702bad60cd9c2d01584831ebf0184f58a9ea6acc25b0502a05",
+      "sha256": "e0fdd388d48b16702bad60cd9c2d01584831ebf0184f58a9ea6acc25b0502a05"
     },
     {
       "caminho": "lib/agent/executor.ts",
@@ -331,8 +337,8 @@
     },
     {
       "caminho": "next-env.d.ts",
-      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
-      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
+      "url": "arquivos/4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac",
+      "sha256": "4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac"
     },
     {
       "caminho": "next.config.ts",
