@@ -1,14 +1,11 @@
 {
-  "versao": "20260810-090956",
+  "versao": "20260810-091849",
   "npm": false,
-  "exigeReinicio": false,
+  "exigeReinicio": true,
   "notas": [
-    "Removido o banner Raiz do projeto em risco (nao pede mais para mover a pasta)",
-    "Blur de fundo em todas as janelas do HUD - conteudo legivel sobre o orbe",
-    "Modo ECO mais leve para iGPUs antigas (menos particulas + bloom mais barato)",
-    "Novo: probe de FPS oculto com ?fps=1 na URL",
-    "arthemis.bat novo: sobe o servidor via npm run dev e abre o navegador automaticamente",
-    "Painel de voz sem caixa - texto flutuante com glow"
+    "Correcao: atualizacao agora reinicia o servidor dos usuarios - o codigo novo ativa na hora (banner de raiz some de vez)",
+    "Correcao: estado reiniciando preso - a pagina agora recarrega apos reiniciar",
+    "Botao Reiniciar servidor dos usuarios no painel PUBLICAR ATUALIZACAO (ligado por padrao)"
   ],
   "arquivos": [
     {
@@ -58,8 +55,8 @@
     },
     {
       "caminho": "app/api/publish/route.ts",
-      "url": "arquivos/51336871570375eecbfd0c7b07e8eb8ba4aa48a0d01a8dc39e22e064ea6fd912",
-      "sha256": "51336871570375eecbfd0c7b07e8eb8ba4aa48a0d01a8dc39e22e064ea6fd912"
+      "url": "arquivos/5962441916baed6d0399e7febd7f865dad796d463b05ce5350020690c19994f2",
+      "sha256": "5962441916baed6d0399e7febd7f865dad796d463b05ce5350020690c19994f2"
     },
     {
       "caminho": "app/api/resumo/route.ts",
@@ -93,8 +90,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/a4e7777f0503024d4f05972b840e33bd81ba9832ec73954935eacf01096be373",
-      "sha256": "a4e7777f0503024d4f05972b840e33bd81ba9832ec73954935eacf01096be373"
+      "url": "arquivos/c5f1c559628a04d6761b3d84715c057bb3e29e456f82850898813d7cc70a3fb6",
+      "sha256": "c5f1c559628a04d6761b3d84715c057bb3e29e456f82850898813d7cc70a3fb6"
     },
     {
       "caminho": "app/icon.svg",
@@ -123,8 +120,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/49b8b2836bb0b64f3f928c1b6add6ec463ba2eb663c885c9db39469b481d8527",
-      "sha256": "49b8b2836bb0b64f3f928c1b6add6ec463ba2eb663c885c9db39469b481d8527"
+      "url": "arquivos/f647fc1da634fd1aeefa8a475bc7e9046f9b7e7285facc6e5243c4082f0ab1be",
+      "sha256": "f647fc1da634fd1aeefa8a475bc7e9046f9b7e7285facc6e5243c4082f0ab1be"
     },
     {
       "caminho": "instrumentation.ts",
@@ -263,8 +260,8 @@
     },
     {
       "caminho": "lib/atualizador.ts",
-      "url": "arquivos/a3916f87f7726153d4daa6503a43a893759bf628effc2197e48b7ca89c98b250",
-      "sha256": "a3916f87f7726153d4daa6503a43a893759bf628effc2197e48b7ca89c98b250"
+      "url": "arquivos/05699d43d789220d64739af931dabb9c8e4b24f80e089112e4ee56c275f6ece4",
+      "sha256": "05699d43d789220d64739af931dabb9c8e4b24f80e089112e4ee56c275f6ece4"
     },
     {
       "caminho": "lib/bilingual.ts",
@@ -293,8 +290,8 @@
     },
     {
       "caminho": "lib/publicador.ts",
-      "url": "arquivos/8a047c4956f4b9fbd8749644f3ce9624e3b5a79f3a559601dfad92d3066b7892",
-      "sha256": "8a047c4956f4b9fbd8749644f3ce9624e3b5a79f3a559601dfad92d3066b7892"
+      "url": "arquivos/49b54261d669bb01a22b06f42601b535abff459c852891cb91f49a1e3c3f78c8",
+      "sha256": "49b54261d669bb01a22b06f42601b535abff459c852891cb91f49a1e3c3f78c8"
     },
     {
       "caminho": "lib/rppg.ts",
@@ -368,8 +365,8 @@
     },
     {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/110a3d1ffa7876b382924ae8678ee88d34f0b69c37bfb681ece951d8a2faf91b",
-      "sha256": "110a3d1ffa7876b382924ae8678ee88d34f0b69c37bfb681ece951d8a2faf91b"
+      "url": "arquivos/75d439e65f19d417e0c92f75fa1cbed28f87c9056893aa9afc89a0a16050e411",
+      "sha256": "75d439e65f19d417e0c92f75fa1cbed28f87c9056893aa9afc89a0a16050e411"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
