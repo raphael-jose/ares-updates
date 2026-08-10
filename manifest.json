@@ -1,12 +1,9 @@
 {
-  "versao": "20260810-161835",
+  "versao": "20260810-162855",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Chat P2P: conexao entre casas GARANTIDA - relay TURN publico automatico (openrelay.metered.ca, o mesmo usado por Nextcloud/Matrix/Jitsi). Sem configurar nada, a conexao agora atravessa NAT restritivo/CGNAT entre casas diferentes. Os dados seguem criptografados de ponta a ponta (o relay so ve ciphertext). Para usar um relay proprio, preencha TURN_URL/TURN_USERNAME/TURN_PASSWORD no .env.",
-    "Chat P2P: aviso por voz, som e badge quando um contato volta a ficar online.",
-    "Chat P2P: diagnostico ICE no painel do desenvolvedor (candidatos host/srflx/relay, estado do canal e uso de TURN) para diagnosticar quedas sem abrir o console.",
-    "Chat P2P: aviso claro quando o relay TURN nao esta disponivel, explicando como resolver."
+    "Chat P2P: correcao de estabilidade - convites simultaneos nao travam mais (desempate deterministico em vez de deadlock de 30s) e conexoes duplicadas para o mesmo contato sao fechadas automaticamente (fim do loop canal-fechado-reconexao que perdia mensagens)."
   ],
   "arquivos": [
     {
@@ -141,8 +138,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/56f9368ea2f0dea5174ab2fc49759c964d60b045350c120bd84fb9d48be6eba4",
-      "sha256": "56f9368ea2f0dea5174ab2fc49759c964d60b045350c120bd84fb9d48be6eba4"
+      "url": "arquivos/82c80dbf24d6b25d8d8486bf97db98ef4ebfdad4e32b69683a1314cd39c3b2f8",
+      "sha256": "82c80dbf24d6b25d8d8486bf97db98ef4ebfdad4e32b69683a1314cd39c3b2f8"
     },
     {
       "caminho": "instrumentation.ts",
