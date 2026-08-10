@@ -1,7 +1,16 @@
 {
-  "versao": "20260810-093058",
+  "versao": "20260810-102134",
   "npm": false,
   "exigeReinicio": true,
+  "notas": [
+    "Chat com foto de perfil (avatar), status online/offline, bloquear e apagar contatos",
+    "IDs padronizados em MAI�SCULO (ex.: ARTHEMIS#914F) � adicionar contato n�o falha mais",
+    "Emojis do chat coloridos (fonte de emoji do sistema) + picker com 447 emojis e 24 figurinhas",
+    "�cones do HUD trocados por Bootstrap Icons (fim dos emojis como �cone)",
+    "Chip de atualiza��o movido para a �rea de erros: vers�o instalada + contagem da pr�xima verifica��o",
+    "Novo: SUGEST�ES E FEEDBACK na �rea de erros � usu�rios enviam sugest�es que chegam direto ao dev",
+    "Novo: FEEDBACK RECEBIDO DOS USU�RIOS na �rea de erros do dev (via MQTT)"
+  ],
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
@@ -27,6 +36,11 @@
       "caminho": "app/api/erros/route.ts",
       "url": "arquivos/f440f30f4ebc99f11e92911d5bc6c464e16597e52e3838b39cbab28c0e96c7d4",
       "sha256": "f440f30f4ebc99f11e92911d5bc6c464e16597e52e3838b39cbab28c0e96c7d4"
+    },
+    {
+      "caminho": "app/api/feedback/route.ts",
+      "url": "arquivos/45a428965d493f40a1f0853ce46b647f1e39ff47c594b2390b6d425f23ba67dc",
+      "sha256": "45a428965d493f40a1f0853ce46b647f1e39ff47c594b2390b6d425f23ba67dc"
     },
     {
       "caminho": "app/api/finance/route.ts",
@@ -85,8 +99,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/c5f1c559628a04d6761b3d84715c057bb3e29e456f82850898813d7cc70a3fb6",
-      "sha256": "c5f1c559628a04d6761b3d84715c057bb3e29e456f82850898813d7cc70a3fb6"
+      "url": "arquivos/b240fe51068237b54d46027193b01b502f505e29c90344ce5841ef1e74b19bf5",
+      "sha256": "b240fe51068237b54d46027193b01b502f505e29c90344ce5841ef1e74b19bf5"
     },
     {
       "caminho": "app/icon.svg",
@@ -115,13 +129,13 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/f647fc1da634fd1aeefa8a475bc7e9046f9b7e7285facc6e5243c4082f0ab1be",
-      "sha256": "f647fc1da634fd1aeefa8a475bc7e9046f9b7e7285facc6e5243c4082f0ab1be"
+      "url": "arquivos/3fa2d55f60cbb60bf32b85c10f9d84ffbb5465cb12a2d958f290f1db0ed912fe",
+      "sha256": "3fa2d55f60cbb60bf32b85c10f9d84ffbb5465cb12a2d958f290f1db0ed912fe"
     },
     {
       "caminho": "instrumentation.ts",
-      "url": "arquivos/b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7",
-      "sha256": "b612b9c3150917eaa20a533da627b45500d4bcf0a3ab93b9478d25e20b2509d7"
+      "url": "arquivos/5e0e732827fdcc4424061c9a55ffe41a0e87056df3fe1847087a4121762126e2",
+      "sha256": "5e0e732827fdcc4424061c9a55ffe41a0e87056df3fe1847087a4121762126e2"
     },
     {
       "caminho": "lib/agent/builtin.ts",
@@ -145,13 +159,18 @@
     },
     {
       "caminho": "lib/agent/errosMqtt.ts",
-      "url": "arquivos/e0fdd388d48b16702bad60cd9c2d01584831ebf0184f58a9ea6acc25b0502a05",
-      "sha256": "e0fdd388d48b16702bad60cd9c2d01584831ebf0184f58a9ea6acc25b0502a05"
+      "url": "arquivos/25f79ef5f112c367b22ca966ce92745054f025951b7caf2ac30c30efe6bf2093",
+      "sha256": "25f79ef5f112c367b22ca966ce92745054f025951b7caf2ac30c30efe6bf2093"
     },
     {
       "caminho": "lib/agent/executor.ts",
       "url": "arquivos/67624637fcfa836cbf1cfe0d85e782027b2cee8bda2cbe702c709a4f63a71347",
       "sha256": "67624637fcfa836cbf1cfe0d85e782027b2cee8bda2cbe702c709a4f63a71347"
+    },
+    {
+      "caminho": "lib/agent/feedback.ts",
+      "url": "arquivos/bd3f3ada31d78f87a5541b30572f7ef920ebf1372c45f4cb4ac8871d033209f4",
+      "sha256": "bd3f3ada31d78f87a5541b30572f7ef920ebf1372c45f4cb4ac8871d033209f4"
     },
     {
       "caminho": "lib/agent/finance.ts",
@@ -165,8 +184,8 @@
     },
     {
       "caminho": "lib/agent/identity.ts",
-      "url": "arquivos/cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa",
-      "sha256": "cd92f1fb1e644d4124ef7a529b579e92368049aa0800939393ad78b9c3a239aa"
+      "url": "arquivos/b882c3ca03103026074bf43e4ef344229c8a900bc64d094446a0c686b20529a9",
+      "sha256": "b882c3ca03103026074bf43e4ef344229c8a900bc64d094446a0c686b20529a9"
     },
     {
       "caminho": "lib/agent/index.ts",
@@ -255,8 +274,8 @@
     },
     {
       "caminho": "lib/atualizador.ts",
-      "url": "arquivos/2a6b771a478cea7fdb603d1ddc6610e00f3b1d0aa3e43e12d2a948407b43fd86",
-      "sha256": "2a6b771a478cea7fdb603d1ddc6610e00f3b1d0aa3e43e12d2a948407b43fd86"
+      "url": "arquivos/c36ae8b4eae905dc360843a377f36ff670fcb3753e125da3fd35032d70b044aa",
+      "sha256": "c36ae8b4eae905dc360843a377f36ff670fcb3753e125da3fd35032d70b044aa"
     },
     {
       "caminho": "lib/bilingual.ts",
