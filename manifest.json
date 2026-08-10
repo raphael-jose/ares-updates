@@ -1,15 +1,10 @@
 {
-  "versao": "20260810-102134",
+  "versao": "20260810-103629",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "Chat com foto de perfil (avatar), status online/offline, bloquear e apagar contatos",
-    "IDs padronizados em MAI�SCULO (ex.: ARTHEMIS#914F) � adicionar contato n�o falha mais",
-    "Emojis do chat coloridos (fonte de emoji do sistema) + picker com 447 emojis e 24 figurinhas",
-    "�cones do HUD trocados por Bootstrap Icons (fim dos emojis como �cone)",
-    "Chip de atualiza��o movido para a �rea de erros: vers�o instalada + contagem da pr�xima verifica��o",
-    "Novo: SUGEST�ES E FEEDBACK na �rea de erros � usu�rios enviam sugest�es que chegam direto ao dev",
-    "Novo: FEEDBACK RECEBIDO DOS USU�RIOS na �rea de erros do dev (via MQTT)"
+    "Corre��o do painel REGISTRO DE A��ES: layout que cortava o FEEDBACK RECEBIDO e a �rea de sugest�es",
+    "Painel agora rola como um todo � nada mais fica espremido ou cortado quando chegam feedbacks"
   ],
   "arquivos": [
     {
@@ -99,8 +94,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/b240fe51068237b54d46027193b01b502f505e29c90344ce5841ef1e74b19bf5",
-      "sha256": "b240fe51068237b54d46027193b01b502f505e29c90344ce5841ef1e74b19bf5"
+      "url": "arquivos/7939c2bd8af218528b1e772cc2d4eb6ad5dfe1fa549ded1a650a3e0c03a6a350",
+      "sha256": "7939c2bd8af218528b1e772cc2d4eb6ad5dfe1fa549ded1a650a3e0c03a6a350"
     },
     {
       "caminho": "app/icon.svg",
@@ -349,8 +344,8 @@
     },
     {
       "caminho": "next-env.d.ts",
-      "url": "arquivos/4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac",
-      "sha256": "4e4da12aa061aac172fb1bcb48e9b6e4b293080d2f494327925fdba8f39632ac"
+      "url": "arquivos/083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd",
+      "sha256": "083e23c4c5e7761db151134ea1ef7896120c86c5888cdc8a861f534f7e86d6fd"
     },
     {
       "caminho": "next.config.ts",
