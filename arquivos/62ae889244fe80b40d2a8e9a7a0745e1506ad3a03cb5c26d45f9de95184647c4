@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ARTHEMIS — janela de carregamento (tema HUD do projeto).
+
+Versão leve: orbe de sinapses enxuto em tkinter, sem dependências externas.
+Núcleo pulsante + 3 anéis de partículas (19 no total, sem halos) + sinapses
+estáveis + pulsos neurais com rastro curto + barra de progresso. Desenhado
+para rodar liso mesmo em máquinas modestas (25 fps, ~40 itens por frame).
+
+Enquanto o arthemis.bat prepara e sobe o servidor, exibe o status escrito
+por ele; quando a porta responde HTTP 200, abre o navegador e fecha sozinha.
+
+Uso:
+    pythonw loading.py [--port 3000] [--status .freebuff/loading-status.txt] [--timeout 120]
+    pythonw loading.py --selftest   # validação: roda ~25 frames e fecha
+"""
+
+import argparse
+import math
+import random
+import time
+import tkinter as tk
+import urllib.request
+import webbrowser
+
+# ─── Tema (mesma paleta do HUD: P&B com acento ciano) ───
+C = {
+    "fundo": "#04070c",
+    "painel": "#071019",
+    "borda": "#0f2b40",
+    "ciano": "#56d9ff",
+    "ciano_forte": "#8fe8ff",
+    "ciano_escuro": "#1d7ea6",
+    "ciano_fundo": "#0a3550",
+    "nucleo": "#bdf0ff",
+    "branco": "#eaf6fc",
+    "texto": "#9fb8cc",
+    "texto_esmaecido": "#5a7085",
+    "perigo": "#ff8a8a",
+}
+
+
+def _entre(a, b, t):
+    """Interpola uma cor hex entre a e b (t 0..1)."""
+    def canal(i):
+        return int(round(int(a[i:i + 2], 16) + (int(b[i:i + 2], 16) - int(a[i:i + 2], 16)) * t))
+    return "#%02x%02x%02x" % (canal(1), canal(3), canal(5))
+
+
+class Orbe(tk.Canvas):
+    """Canvas com o orbe de sinapses animado (leve)."""
+
+    def __init__(self, master, largura=640, altura=420, **kw):
+        super().__init__(master, width=largura, height=altura, bg=C["fundo"],
+                         highlightthickness=0, bd=0, **kw)
+        self.w = largura
+        self.h = altura
+        self.t0 = time.time()
+        # anéis: raio, nº de partículas, velocidade angular, fase inicial
+        self.aneis = [
+            {"raio": 64, "n": 4, "vel": 0.011, "fase": 0.0},
+            {"raio": 102, "n": 6, "vel": -0.0075, "fase": 2.1},
+            {"raio": 142, "n": 9, "vel": 0.0052, "fase": 4.2},
+        ]
+        # pontes fixas entre anéis vizinhos (estáveis — sem flicker)
+        self.pontes = []
+        for k in range(len(self.aneis) - 1):
+            n0, n1 = self.aneis[k]["n"], self.aneis[k + 1]["n"]
+            for i in range(n0):
+                j = (i * n1) // n0
+                self.pontes.append((k, i, j))
+        self.pulsos = []  # pulsos neurais: {a, b, t}
+        self.proximo_pulso = time.time() + random.uniform(1.2, 2.2)
+        self.frame(0)
+
+    def _posicoes(self, t):
+        """Devolve (cx, cy, [[(x,y),...], ...]) das partículas no instante t."""
+        w = self.winfo_width() or self.w
+        h = self.winfo_height() or self.h
+        cx, cy = w / 2, h / 2 + 34  # orbe levemente abaixo do título
+        saida = []
+        for anel in self.aneis:
+            pts = []
+            for i in range(anel["n"]):
+                ang = anel["fase"] + t * anel["vel"] * 60 + (i * 2 * math.pi / anel["n"])
+                r = anel["raio"]
+                pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+            saida.append(pts)
+        return cx, cy, saida
+
+    def frame(self, passo):
+        t = time.time() - self.t0
+        self.delete("all")
+        w = self.winfo_width() or self.w
+        h = self.winfo_height() or self.h
+        cx, cy, aneis_pts = self._posicoes(t)
+
+        # ── título + subtítulo (desenhados no canvas, acima do orbe) ──
+        self.create_text(cx, 42, text="A R T H E M I S", fill=C["nucleo"],
+                         font=("Segoe UI", 24, "bold"))
+        self.create_line(cx - 92, 64, cx + 92, 64, fill=C["ciano_fundo"], width=2)
+        self.create_line(cx - 30, 64, cx + 30, 64, fill=C["ciano_escuro"], width=2)
+        self.create_text(cx, 82, text="ASSISTENTE INTELIGENTE · ACESSO LOCAL",
+                         fill=C["texto_esmaecido"], font=("Segoe UI", 9))
+
+        # ── sinapses (vizinhos de cada anel) ──
+        brilho = 0.55 + 0.45 * math.sin(t * 0.7)
+        for pts in aneis_pts:
+            n = len(pts)
+            for i in range(n):
+                a, b = pts[i], pts[(i + 1) % n]
+                self.create_line(a[0], a[1], b[0], b[1],
+                                 fill=_entre(C["ciano_escuro"], C["ciano"], 0.35 + 0.35 * brilho),
+                                 width=1)
+        # pontes estáveis entre anéis vizinhos
+        for k, i, j in self.pontes:
+            a, b = aneis_pts[k][i], aneis_pts[k + 1][j]
+            self.create_line(a[0], a[1], b[0], b[1],
+                             fill=_entre(C["ciano_escuro"], C["ciano"], 0.16), width=1)
+
+        # ── pulsos neurais (rastro curto, até 4 pontos) ──
+        agora = time.time()
+        if agora >= self.proximo_pulso and len(self.pulsos) < 3:
+            anel = random.choice(aneis_pts)
+            i = random.randrange(len(anel))
+            self.pulsos.append({"a": anel[i], "b": anel[(i + 1) % len(anel)], "t": 0.0})
+            self.proximo_pulso = agora + random.uniform(1.6, 3.0)
+        self.pulsos = [p for p in self.pulsos if p["t"] <= 1.0]
+        for p in self.pulsos:
+            p["t"] += 0.05
+            for trecho in range(4):
+                tt = p["t"] - trecho * 0.05
+                if tt <= 0 or tt > 1:
+                    continue
+                x = p["a"][0] + (p["b"][0] - p["a"][0]) * tt
+                y = p["a"][1] + (p["b"][1] - p["a"][1]) * tt
+                raio = 2.2 * (1 - trecho * 0.12)
+                cor = _entre(C["branco"], C["ciano_forte"], max(0.0, 1 - trecho * 0.3))
+                self.create_oval(x - raio, y - raio, x + raio, y + raio, fill=cor, outline="")
+
+        # ── partículas orbitando (uma oval cada — sem halo) ──
+        for k, pts in enumerate(aneis_pts):
+            for i, (x, y) in enumerate(pts):
+                tam = 2.3 - k * 0.3
+                f = 0.5 + 0.5 * math.sin(t * 2.2 + i * 1.7 + k * 0.9)
+                cor = _entre(C["ciano_escuro"], C["ciano_forte"], 0.6 + 0.4 * f)
+                self.create_oval(x - tam, y - tam, x + tam, y + tam, fill=cor, outline="")
+
+        # ── núcleo pulsante (2 anéis de brilho + 3 ovals) ──
+        pulso = 0.5 + 0.5 * math.sin(t * 1.9)
+        r = 18 + 4 * pulso
+        for i, mult in enumerate((2.4, 1.7)):
+            rr = r * mult
+            self.create_oval(cx - rr, cy - rr, cx + rr, cy + rr,
+                             outline=_entre(C["ciano_fundo"], C["ciano_escuro"], 0.5 - i * 0.18),
+                             width=1)
+        self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=C["ciano_escuro"], outline="")
+        self.create_oval(cx - r * 0.62, cy - r * 0.62, cx + r * 0.62, cy + r * 0.62,
+                         fill=C["nucleo"], outline="")
+        self.create_oval(cx - r * 0.30, cy - r * 0.30, cx + r * 0.30, cy + r * 0.30,
+                         fill=C["branco"], outline="")
+
+        # ── barra de progresso (indeterminada) no rodapé do canvas ──
+        self._barra(t, w, h)
+
+        self.after(40, self.frame, 0)  # 25 fps — leve
+
+    def _barra(self, t, w, h):
+        bw, bh = 260, 4
+        x0 = (w - bw) // 2
+        y = h - 30
+        self.create_rectangle(x0 - 1, y - 1, x0 + bw + 1, y + bh + 1,
+                              fill=C["painel"], outline=C["borda"])
+        larg = 90  # comprimento do segmento que desliza
+        x = x0 + int((t * 60) % (bw + larg)) - larg
+        x = max(x0, min(x, x0 + bw - 1))
+        x2 = min(x + larg, x0 + bw)
+        if x2 > x:
+            self.create_rectangle(x, y, x2, y + bh, fill=C["ciano"], outline="")
+
+
+class JanelaLoading:
+    """Janela sem bordas do sistema, estilizada com o tema do projeto."""
+
+    def __init__(self, porta, status_arquivo, timeout):
+        self.porta = porta
+        self.status_arquivo = status_arquivo
+        self.timeout = timeout
+        self.t_inicio = time.time()
+
+        self.root = tk.Tk()
+        self.root.title("Arthemis")
+        self.root.overrideredirect(True)          # sem borda do sistema
+        self.root.attributes("-topmost", True)    # fica por cima do console
+        self.root.configure(bg=C["fundo"])
+
+        largura, altura = 640, 520
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x, y = (sw - largura) // 2, max(40, (sh - altura) // 2 - 40)
+        self.root.geometry(f"{largura}x{altura}+{x}+{y}")
+
+        # moldura externa (borda ciano sutil)
+        moldura = tk.Frame(self.root, bg=C["borda"], bd=1)
+        moldura.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # ── barra de título customizada ──
+        barra = tk.Frame(moldura, bg=C["painel"], height=42)
+        barra.pack(fill="x")
+        barra.pack_propagate(False)
+        tk.Label(barra, text="◉  ARTHEMIS", fg=C["ciano_forte"], bg=C["painel"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=12)
+        fechar = tk.Label(barra, text="✕", fg=C["texto_esmaecido"], bg=C["painel"],
+                          font=("Segoe UI", 12), cursor="hand2", padx=12)
+        fechar.pack(side="right", fill="y")
+        fechar.bind("<Button-1>", lambda e: self.root.destroy())
+        fechar.bind("<Enter>", lambda e: fechar.configure(fg=C["perigo"]))
+        fechar.bind("<Leave>", lambda e: fechar.configure(fg=C["texto_esmaecido"]))
+        # arrastar a janela pela barra
+        barra.bind("<Button-1>", self._iniciar_arrasto)
+        barra.bind("<B1-Motion>", self._arrastar)
+
+        # ── orbe ──
+        self.orbe = Orbe(moldura)
+        self.orbe.pack(fill="both", expand=True)
+
+        # ── linha de status ──
+        rodape = tk.Frame(moldura, bg=C["fundo"], height=52)
+        rodape.pack(fill="x")
+        rodape.pack_propagate(False)
+        self.status = tk.StringVar(value="▸ Iniciando Arthemis…")
+        tk.Label(rodape, textvariable=self.status, fg=C["ciano"], bg=C["fundo"],
+                 font=("Consolas", 10), anchor="w").pack(fill="x", padx=16, pady=6)
+        tk.Label(rodape, text="O servidor roda em segundo plano — feche o app para parar.",
+                 fg=C["texto_esmaecido"], bg=C["fundo"], font=("Segoe UI", 8),
+                 anchor="w").pack(fill="x", padx=16)
+
+        self.root.bind("<Escape>", lambda e: self.root.destroy())
+
+    def _iniciar_arrasto(self, e):
+        self._dx = e.x_root - self.root.winfo_x()
+        self._dy = e.y_root - self.root.winfo_y()
+
+    def _arrastar(self, e):
+        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
+
+    # ── loop de status (lê o arquivo escrito pelo .bat) ──
+    def _ler_status(self):
+        try:
+            with open(self.status_arquivo, "r", encoding="utf-8") as f:
+                linhas = [l for l in f.read().splitlines() if l.strip()]
+            if linhas:
+                self.status.set("▸ " + linhas[-1].strip())
+        except OSError:
+            pass
+        self.root.after(300, self._ler_status)
+
+    # ── verificação do servidor (abre o navegador quando sobe) ──
+    def _verificar_servidor(self):
+        url = f"http://127.0.0.1:{self.porta}/"
+        ok = False
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as r:
+                ok = r.status == 200
+        except Exception:
+            ok = False
+        if ok:
+            self.status.set("✓ Servidor no ar — abrindo o navegador…")
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+            self.root.after(1500, self.root.destroy)
+            return
+        if time.time() - self.t_inicio > self.timeout:
+            self.status.set("✗ Tempo esgotado — veja o log do servidor e tente de novo.")
+            return
+        self.root.after(350, self._verificar_servidor)
+
+    def rodar(self):
+        self._ler_status()
+        self._verificar_servidor()
+        self.root.mainloop()
+
+
+def selftest():
+    """Roda a janela por alguns frames e fecha — validação sem travar."""
+    janela = JanelaLoading(39999, "", 5)
+    frames = [0]
+
+    def parar():
+        frames[0] += 1
+        if frames[0] >= 25:
+            janela.root.destroy()
+        else:
+            janela.root.after(40, parar)
+
+    janela.root.after(40, parar)
+    janela.root.after(300, lambda: janela.status.set("▸ selftest"))
+    janela.root.mainloop()
+    print("loading.py: selftest OK")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Janela de carregamento do Arthemis")
+    ap.add_argument("--port", type=int, default=3000)
+    ap.add_argument("--status", default=".freebuff\\loading-status.txt")
+    ap.add_argument("--timeout", type=int, default=120)
+    ap.add_argument("--selftest", action="store_true")
+    args = ap.parse_args()
+    if args.selftest:
+        selftest()
+        return
+    janela = JanelaLoading(args.port, args.status, args.timeout)
+    janela.rodar()
+
+
+if __name__ == "__main__":
+    main()
