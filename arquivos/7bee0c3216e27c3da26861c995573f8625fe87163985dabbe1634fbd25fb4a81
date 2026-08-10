@@ -1,0 +1,43 @@
+import { NextRequest, NextResponse } from "next/server";
+import { addAgenda, listAgenda, removeAgenda } from "@/lib/agent/memory";
+
+export const runtime = "nodejs";
+
+/**
+ * API da agenda/calendário do ARES.
+ * - GET  /api/agenda            → todos os compromissos (mais próximos primeiro)
+ * - GET  /api/agenda?quando=hoje → filtrados (hoje/amanhã/semana/data/dia da semana)
+ * - POST /api/agenda  { texto: "reunião amanhã às 15h" } → marca
+ * - DELETE /api/agenda { filtro: "reunião" | "#2" | id } → desmarca
+ */
+export async function GET(req: NextRequest) {
+  const quando = req.nextUrl.searchParams.get("quando") ?? undefined;
+  return NextResponse.json({ ok: true, agenda: listAgenda(quando) });
+}
+
+export async function POST(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as {
+    texto?: unknown;
+    titulo?: unknown;
+    quando?: unknown;
+  };
+  const texto = String(body.texto ?? body.titulo ?? "").trim();
+  const quando = String(body.quando ?? "").trim();
+  const completo = quando ? `${texto} ${quando}` : texto;
+  if (!completo) {
+    return NextResponse.json(
+      { ok: false, message: "Fale o compromisso e quando — ex.: reunião amanhã às 15h." },
+      { status: 400 },
+    );
+  }
+  return NextResponse.json(await addAgenda(completo));
+}
+
+export async function DELETE(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as { filtro?: unknown };
+  const filtro = String(body.filtro ?? "").trim();
+  if (!filtro) {
+    return NextResponse.json({ ok: false, message: "Diga qual compromisso remover." }, { status: 400 });
+  }
+  return NextResponse.json(await removeAgenda(filtro));
+}
