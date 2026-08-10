@@ -1,0 +1,515 @@
+/**
+ * Música do HUD: busca no YouTube e toca SÓ o áudio (sem abrir o vídeo).
+ *
+ * Usa o yt-dlp (binário auto-contido) para buscar e extrair o stream de áudio
+ * de verdade (itag m4a/opus), em vez de depender de APIs públicas instáveis
+ * (Invidious/Piped). O binário é procurado em:
+ *   1. PATH ("yt-dlp")
+ *   2. scripts/yt-dlp(.exe) do projeto
+ *   3. python -m yt_dlp (módulo pip)
+ *   4. Auto-download do yt-dlp.exe oficial para scripts/ (Windows) — a
+ *      primeira busca baixa ~19MB; as seguintes usam o binário local.
+ */
+
+import { spawn } from "child_process";
+import fs from "fs";
+import path from "path";
+
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+export interface MusicTrack {
+  id: string;
+  titulo: string;
+  artista: string;
+  /** Duração em segundos (0 se desconhecida). */
+  duracao: number;
+  /** URL da miniatura (i.ytimg.com). */
+  thumb: string;
+  /** Visto como "upload de álbum/playlist" (título sugere álbum completo). */
+  album?: boolean;
+}
+
+const YTDLP_EXE = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+const YTDLP_DOWNLOAD =
+  "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+
+// Cache do caminho do yt-dlp por sessão (evita re-procurar a cada comando)
+let ytdlpPathCache: string | null | undefined;
+let installing = false;
+
+/** Mapa id → { url, expira } para o stream de áudio resolvido.
+ *  O "expira" vem do parâmetro expire= da própria URL do YouTube
+ *  (URLs assinadas morrem em algumas horas), com teto de 25 min em memória. */
+const urlCache = new Map<string, { url: string; expira: number }>();
+const URL_TTL_MS = 25 * 60 * 1000;
+
+// ——— Cache PERSISTENTE em disco (scripts/.ares-audio-urls.json) ———
+// Reaquecido no boot: repetir a mesma música em outra sessão toca quase
+// instantâneo (sem yt-dlp nenhum). Só guarda URLs ainda válidas (expire=).
+const AUDIO_DISK_FILE = path.join(process.cwd(), "scripts", ".ares-audio-urls.json");
+const URL_DISK_TTL_MS = 10 * 24 * 60 * 60 * 1000; // só como piso; expire= reina
+let urlDiskCache: Map<string, { url: string; expira: number }> | null = null;
+let urlDiskTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadUrlDiskCache(): Map<string, { url: string; expira: number }> {
+  if (urlDiskCache) return urlDiskCache;
+  urlDiskCache = new Map();
+  try {
+    if (fs.existsSync(AUDIO_DISK_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(AUDIO_DISK_FILE, "utf8")) as Array<
+        [string, { url: string; expira: number }]
+      >;
+      if (Array.isArray(raw)) urlDiskCache = new Map(raw);
+    }
+  } catch {
+    urlDiskCache = new Map();
+  }
+  return urlDiskCache;
+}
+
+function persistUrlDiskCache(): void {
+  if (urlDiskTimer) return; // debounce
+  urlDiskTimer = setTimeout(() => {
+    urlDiskTimer = null;
+    try {
+      let map = urlDiskCache ?? loadUrlDiskCache();
+      // Mantém só as 400 URLs mais recentes (Map preserva ordem de inserção)
+      if (map.size > 400) {
+        map = new Map([...map.entries()].slice(-400));
+        urlDiskCache = map;
+      }
+      fs.mkdirSync(path.dirname(AUDIO_DISK_FILE), { recursive: true });
+      const agora = Date.now();
+      fs.writeFileSync(
+        AUDIO_DISK_FILE,
+        JSON.stringify([...map.entries()].filter(([, v]) => v.expira > agora)),
+      );
+    } catch {
+      /* noop */
+    }
+  }, 900);
+}
+
+/** Guarda a URL no cache (memória + disco). Usa o expire= da URL quando existe. */
+function cacheUrl(id: string, url: string): void {
+  const m = url.match(/[?&]expire=(\d+)/);
+  const expira = m
+    ? Math.min(Number(m[1]) * 1000, Date.now() + URL_TTL_MS)
+    : Date.now() + URL_TTL_MS;
+  if (expira <= Date.now() + 30_000) return; // já venceu: não vale a pena
+  urlCache.set(id, { url, expira });
+  loadUrlDiskCache().set(id, { url, expira });
+  if ((urlDiskCache?.size ?? 0) < 1200) persistUrlDiskCache();
+}
+
+// ——— Cache de BUSCA em memória (faz consulta “toca músicas do X” repetida instantânea) ———
+const searchCache = new Map<string, { at: number; data: { tracks: MusicTrack[]; primeiroUrl: string | null } }>();
+const SEARCH_TTL_MS = 20 * 60 * 1000;
+
+function scriptsYtDlp(): string {
+  return path.join(process.cwd(), "scripts", YTDLP_EXE);
+}
+
+function findYtDlpCandidates(): string[] {
+  const out: string[] = [];
+  if (process.platform === "win32") {
+    const exe = scriptsYtDlp();
+    if (fs.existsSync(exe)) out.push(exe);
+  } else {
+    const bin = scriptsYtDlp();
+    if (fs.existsSync(bin)) out.push(bin);
+  }
+  return out;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Roda um comando ASSÍNCRONO (spawn, nunca spawnSync): o event loop NÃO é
+ * bloqueado — o Hermes roda este probe no boot e o servidor não pode congelar
+ * durante ele. Resolve true se o processo sair com código 0.
+ */
+function runAsync(bin: string, args: string[], timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(bin, args, { stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* noop */
+      }
+      resolve(false);
+    }, timeoutMs);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+}
+
+/** Verifica se um caminho responde a "yt-dlp --version" (3 tentativas, async). */
+async function probeBinary(bin: string): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    if (await runAsync(bin, ["--version"], 20000)) return true;
+    if (i < 2) await sleep(1200);
+  }
+  return false;
+}
+
+/** Baixa o yt-dlp.exe oficial para scripts/ (self-contained, sem instalar no sistema). */
+async function downloadYtDlp(): Promise<boolean> {
+  if (installing) return false; // já tem uma instalação em andamento
+  installing = true;
+  try {
+    const dest = scriptsYtDlp();
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const res = await fetch(YTDLP_DOWNLOAD, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(120_000),
+      headers: { "User-Agent": UA },
+    });
+    if (!res.ok || !res.body) return false;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 1_000_000) return false; // suspeito (< 1MB)
+    fs.writeFileSync(dest, buf);
+    if (process.platform !== "win32") fs.chmodSync(dest, 0o755);
+    return probeBinary(dest);
+  } catch {
+    return false;
+  } finally {
+    installing = false;
+  }
+}
+
+/** Procura o yt-dlp (PATH → scripts/ → pip) e instala se preciso. Retorna o caminho ou null. */
+export async function ensureYtDlp(): Promise<string | null> {
+  if (ytdlpPathCache !== undefined) return ytdlpPathCache;
+  // 1) PATH
+  if (await probeBinary("yt-dlp")) {
+    ytdlpPathCache = "yt-dlp";
+    return ytdlpPathCache;
+  }
+  // 2) scripts/ do projeto
+  for (const cand of findYtDlpCandidates()) {
+    if (await probeBinary(cand)) {
+      ytdlpPathCache = cand;
+      return ytdlpPathCache;
+    }
+  }
+  // 3) módulo pip
+  if (await runAsync("python", ["-m", "yt_dlp", "--version"], 10000)) {
+    ytdlpPathCache = "python";
+    return ytdlpPathCache;
+  }
+  if (await runAsync("python3", ["-m", "yt_dlp", "--version"], 10000)) {
+    ytdlpPathCache = "python3";
+    return ytdlpPathCache;
+  }
+  // 4) auto-download (só Windows, binário oficial; Linux/mac pedem pip ou binário)
+  if (process.platform === "win32") {
+    if (installing) {
+      // Outro request já está baixando: espera ele terminar (até ~2 min) e
+      // usa o binário resultante em vez de cachear null (corrida do cache).
+      const deadline = Date.now() + 120_000;
+      while (installing && Date.now() < deadline) {
+        await sleep(500);
+      }
+      if (await probeBinary(scriptsYtDlp())) {
+        ytdlpPathCache = scriptsYtDlp();
+        return ytdlpPathCache;
+      }
+    } else if (await downloadYtDlp()) {
+      ytdlpPathCache = scriptsYtDlp();
+      return ytdlpPathCache;
+    }
+  }
+  ytdlpPathCache = null;
+  return ytdlpPathCache;
+}
+
+/** Estado para a UI: disponível / instalando / ausente. */
+export async function ytDlpStatus(): Promise<{
+  disponivel: boolean;
+  instalando: boolean;
+  caminho: string | null;
+}> {
+  const caminho = await ensureYtDlp();
+  return { disponivel: caminho !== null, instalando: installing, caminho };
+}
+
+function runYtDlp(args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string }> {
+  return new Promise((resolve) => {
+    const bin = ytdlpPathCache;
+    if (!bin) {
+      resolve({ ok: false, stdout: "" });
+      return;
+    }
+    const cmd =
+      bin === "python" || bin === "python3"
+        ? spawn(bin, ["-m", "yt_dlp", ...args], { timeout: timeoutMs })
+        : spawn(bin, args, { timeout: timeoutMs });
+    let out = "";
+    let err = "";
+    cmd.stdout?.on("data", (d: Buffer) => (out += d.toString("utf8")));
+    cmd.stderr?.on("data", (d: Buffer) => (err += d.toString("utf8")));
+    cmd.on("error", () => resolve({ ok: false, stdout: "" }));
+    cmd.on("close", (code) => {
+      resolve({ ok: code === 0 && out.length > 0, stdout: out || err });
+    });
+  });
+}
+
+function normalizeTitle(s: string): string {
+  return (s ?? "")
+    .replace(/\(Official\s+(?:Audio|Music|Video)\)/gi, "")
+    .replace(/\[Official\s+(?:Audio|Music|Video)\]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function entryToTrack(e: Record<string, unknown>): MusicTrack | null {
+  const id = typeof e.id === "string" && e.id ? e.id : null;
+  const title = typeof e.title === "string" ? normalizeTitle(e.title) : "";
+  if (!id || !title) return null;
+  const durRaw = e.duration;
+  const duracao = typeof durRaw === "number" && Number.isFinite(durRaw) ? durRaw : 0;
+  const artista =
+    typeof e.uploader === "string" && e.uploader
+      ? e.uploader
+      : typeof e.channel === "string" && e.channel
+        ? e.channel
+        : "";
+  // Durações longas (~> 15 min) com uploader = álbum/playlist completa
+  const album = duracao > 900 || /(?:full\s+album|album\s+completo|playlist\s+oficial|complete\s+album)/i.test(title);
+  return {
+    id,
+    titulo: title,
+    artista: artista.replace(/\s*-\s*Topic$/i, "").replace(/\s*[-|]\s*Topic$/i, ""),
+    duracao,
+    thumb: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+    album,
+  };
+}
+
+/** Busca faixas no YouTube (só metadados — rápido, sem extrair vídeo). */
+export async function searchMusic(query: string): Promise<MusicTrack[]> {
+  const bin = await ensureYtDlp();
+  if (!bin) return [];
+  const q = query.trim();
+  if (!q) return [];
+
+  // Busca principal + (se for artista/nome curto) busca de álbuns completos.
+  // As duas rodam EM PARALELO (a latência não dobra) e são mescladas por id.
+  const queries = [`ytsearch20:${q}`];
+  if (q.split(/\s+/).length <= 3) queries.push(`ytsearch10:${q} album completo`);
+
+  const results = await Promise.all(
+    queries.map(async (qs) => {
+      const { ok, stdout } = await runYtDlp(
+        ["--flat-playlist", "--no-playlist", "--no-warnings", "-J", qs],
+        30_000,
+      );
+      if (!ok) return [];
+      try {
+        const json = JSON.parse(stdout) as { entries?: Record<string, unknown>[] };
+        return (json.entries ?? [])
+          .map(entryToTrack)
+          .filter((t): t is MusicTrack => t !== null);
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  const seen = new Set<string>();
+  const tracks: MusicTrack[] = [];
+  for (const list of results) {
+    for (const t of list) {
+      if (!seen.has(t.id)) {
+        seen.add(t.id);
+        tracks.push(t);
+      }
+    }
+  }
+  return tracks.slice(0, 30);
+}
+
+/** Extrai URL + metadados do TOP-1 resultado do YouTube (1 comando yt-dlp só).
+ *  Isso corta o caminho "comando → tocar" pela metade: em vez de buscar (lista)
+ *  e depois extrair o áudio (2 rodadas), a extração do primeiro resultado
+ *  acontece EM PARALELO com a busca da lista. */
+async function extractTopFirst(
+  query: string,
+): Promise<{ id: string; titulo: string; artista: string; duracao: number; url: string } | null> {
+  const bin = ytdlpPathCache;
+  if (!bin) return null;
+  const { ok, stdout } = await runYtDlp(
+    [
+      "--no-warnings",
+      "--no-playlist",
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+      "-g",
+      "--print",
+      "%(id)s|%(title)s|%(uploader)s|%(duration)s",
+      `ytsearch1:${query}`,
+    ],
+    45_000,
+  );
+  const lines = (stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const meta = lines.find((l) => l.includes("|"));
+  const url = lines.find((l) => /^https?:\/\//.test(l));
+  if (!meta || !url) return null;
+  const [id, titulo, artista, durRaw] = meta.split("|");
+  if (!id || !titulo) return null;
+  return {
+    id,
+    titulo: normalizeTitle(titulo),
+    artista: (artista ?? "").replace(/\s*-\s*Topic$/i, "").replace(/\s*[-|]\s*Topic$/i, ""),
+    duracao: Number(durRaw) || 0,
+    url,
+  };
+}
+
+export interface MusicSearchOutcome {
+  tracks: MusicTrack[];
+  /** URL de áudio já resolvida do 1º resultado (quando a extração venceu) —
+   *  quem toca depois usa o cache e não espera segundos extras. */
+  primeiroUrl: string | null;
+}
+
+/** Busca rápida: lista (flat) + extração do top-1 em PARALELO, com cache de
+ *  memória. Consultas repetidas voltam instantâneas. */
+export async function searchMusicFast(query: string): Promise<MusicSearchOutcome> {
+  const bin = await ensureYtDlp();
+  if (!bin) return { tracks: [], primeiroUrl: null };
+  const q = query.trim();
+  if (!q) return { tracks: [], primeiroUrl: null };
+
+  const chave = q.toLowerCase();
+  const cached = searchCache.get(chave);
+  if (cached && Date.now() - cached.at < SEARCH_TTL_MS) return cached.data;
+
+  // Busca da lista + extração do top-1 em paralelo (latência = max, não soma).
+  // ATENÇÃO: no máximo DOIS processos yt-dlp simultâneos — com 3 o YouTube
+  // começa a estrangular a mesma rede (medido: 8s→44s). O segundo flat
+  // "album completo" foi movido para a busca comum (searchMusic) de expansão.
+  const topP = extractTopFirst(q).catch(() => null);
+  const results = await Promise.all(
+    [
+      // Busca principal (20 resultados) — junto com a extração do topo
+      `ytsearch20:${q}`,
+    ].map(async (qs) => {
+      const { ok, stdout } = await runYtDlp(
+        ["--flat-playlist", "--no-playlist", "--no-warnings", "-J", qs],
+        30_000,
+      );
+      if (!ok) return [];
+      try {
+        const json = JSON.parse(stdout) as { entries?: Record<string, unknown>[] };
+        return (json.entries ?? [])
+          .map(entryToTrack)
+          .filter((t): t is MusicTrack => t !== null);
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  const seen = new Set<string>();
+  const tracks: MusicTrack[] = [];
+  for (const list of results) {
+    for (const t of list) {
+      if (!seen.has(t.id)) {
+        seen.add(t.id);
+        tracks.push(t);
+      }
+    }
+  }
+
+  const top = await topP;
+  let primeiroUrl: string | null = null;
+  if (top) {
+    cacheUrl(top.id, top.url);
+    primeiroUrl = top.url;
+    // Se o top-1 extraído não apareceu na lista flat (raro), ele entra na
+    // frente devidamente — a busca fica "precisa" com o verdadeiro topo.
+    if (!seen.has(top.id)) {
+      const t: MusicTrack = {
+        id: top.id,
+        titulo: top.titulo,
+        artista: top.artista,
+        duracao: top.duracao,
+        thumb: `https://i.ytimg.com/vi/${top.id}/hqdefault.jpg`,
+      };
+      tracks.unshift(t);
+    }
+  }
+
+  const data: MusicSearchOutcome = { tracks: tracks.slice(0, 30), primeiroUrl };
+  searchCache.set(chave, { at: Date.now(), data });
+  if (searchCache.size > 200) {
+    // descarta entradas velhas para não crescer sem limite
+    const agora = Date.now();
+    for (const [k, v] of searchCache) {
+      if (agora - v.at > SEARCH_TTL_MS) searchCache.delete(k);
+      if (searchCache.size <= 100) break;
+    }
+  }
+  return data;
+}
+
+/** Resoluções em andamento por id — o prefetch e o stream do MESMO id compartilham
+ * uma única chamada ao yt-dlp (sem corrida nem trabalho duplicado). */
+const inflightResolve = new Map<string, Promise<string | null>>();
+
+async function doResolveAudioUrl(id: string): Promise<string | null> {
+  const bin = await ensureYtDlp();
+  if (!bin) return null;
+  const { ok, stdout } = await runYtDlp(
+    [
+      "--no-warnings",
+      "--no-playlist",
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+      "-g",
+      `https://www.youtube.com/watch?v=${id}`,
+    ],
+    45_000,
+  );
+  const url = (stdout ?? "").trim().split("\n")[0] ?? "";
+  if (!ok || !/^https?:\/\//.test(url)) return null;
+  cacheUrl(id, url);
+  return url;
+}
+
+/** Resolve a URL direta de áudio de um vídeo (m4a/opus via yt-dlp), com cache
+ *  em memória + disco (a mesma música re-tocada atravessa sessões sem rede). */
+export async function resolveAudioUrl(id: string): Promise<string | null> {
+  const cache = urlCache.get(id);
+  if (cache && cache.expira > Date.now()) return cache.url;
+  const emAndamento = inflightResolve.get(id);
+  if (emAndamento) return emAndamento;
+  const agora = Date.now();
+  const disk = loadUrlDiskCache().get(id);
+  if (disk && disk.expira > agora) {
+    if (disk.expira > agora + URL_TTL_MS) disk.expira = agora + URL_TTL_MS; // teto em memória
+    urlCache.set(id, disk);
+    return disk.url;
+  }
+  const p = doResolveAudioUrl(id);
+  inflightResolve.set(id, p);
+  void p.finally(() => inflightResolve.delete(id));
+  return p;
+}
