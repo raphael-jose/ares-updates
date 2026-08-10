@@ -1,0 +1,9 @@
+import { NextResponse } from "next/server";
+import { getHermesStatus } from "@/lib/agent/hermes";
+
+export const dynamic = "force-dynamic";
+
+/** Estado do daemon Hermes (aquecimento, cache e memória). */
+export async function GET() {
+  return NextResponse.json(getHermesStatus());
+}
