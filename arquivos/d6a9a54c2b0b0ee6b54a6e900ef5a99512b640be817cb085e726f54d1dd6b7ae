@@ -1,0 +1,12 @@
+import { NextResponse } from "next/server";
+import { listarRespostas } from "@/lib/agent/feedback";
+
+export const runtime = "nodejs";
+
+/**
+ * Usuário consulta as respostas do dev ao feedback que enviou:
+ *   GET /api/feedback/respostas → lista (mais recentes primeiro)
+ */
+export async function GET() {
+  return NextResponse.json({ respostas: listarRespostas() });
+}
