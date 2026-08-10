@@ -1,0 +1,87 @@
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import os from "os";
+
+/**
+ * Memória de conversa (contexto de longo prazo): o ARES guarda os últimos
+ * turnos da conversa em ~/.ares/conversation.json, então ele não perde o fio
+ * da meada entre perguntas nem depois de reiniciar o PC/servidor.
+ */
+
+export interface ConversationTurn {
+  role: "user" | "assistant";
+  content: string;
+  at: number;
+}
+
+const CONV_DIR = path.join(os.homedir(), ".ares");
+// Override por env permite testar sem tocar no histórico real do usuário
+const CONV_FILE =
+  process.env.ARES_CONVERSATION_FILE ?? path.join(CONV_DIR, "conversation.json");
+
+// 24 turnos (≈ 12 perguntas + 12 respostas): cabe no contexto do modelo local
+const MAX_TURNS = 24;
+const MAX_TURN_LEN = 400;
+
+let cache: ConversationTurn[] | null = null;
+let writeQueue: Promise<void> = Promise.resolve();
+
+function ensureLoaded(): ConversationTurn[] {
+  if (cache) return cache;
+  try {
+    const raw = fs.readFileSync(CONV_FILE, "utf8");
+    const parsed = JSON.parse(raw) as { turns?: unknown };
+    const turns: ConversationTurn[] = [];
+    if (Array.isArray(parsed.turns)) {
+      for (const t of parsed.turns) {
+        if (!t || typeof t !== "object") continue;
+        const turn = t as Partial<ConversationTurn>;
+        if (
+          (turn.role === "user" || turn.role === "assistant") &&
+          typeof turn.content === "string"
+        ) {
+          turns.push({ role: turn.role, content: turn.content.slice(0, MAX_TURN_LEN), at: Number(turn.at) || 0 });
+        }
+      }
+    }
+    cache = turns.slice(-MAX_TURNS);
+  } catch {
+    cache = [];
+  }
+  return cache;
+}
+
+function scheduleSave(): void {
+  const data = cache ?? [];
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(CONV_DIR, { recursive: true });
+      await fsp.writeFile(CONV_FILE, JSON.stringify({ turns: data }, null, 2), "utf8");
+    } catch {
+      /* gravação falhou; a sessão continua com o histórico em cache */
+    }
+  });
+}
+
+/** Acrescenta um turno (pergunta do usuário ou resposta do ARES) ao histórico. */
+export function appendTurn(role: "user" | "assistant", content: string): void {
+  const c = (content ?? "").trim();
+  if (!c) return;
+  const turns = ensureLoaded();
+  turns.push({ role, content: c.slice(0, MAX_TURN_LEN), at: Date.now() });
+  while (turns.length > MAX_TURNS) turns.shift();
+  scheduleSave();
+}
+
+/** Últimos N turnos (metade do limite por padrão), para injetar no prompt. */
+export function getConversationTurns(limit = Math.floor(MAX_TURNS / 2)): ConversationTurn[] {
+  const turns = ensureLoaded();
+  return turns.slice(-Math.max(1, Math.min(MAX_TURNS, limit)));
+}
+
+/** Apaga o histórico (comando de voz: "limpa a conversa"). */
+export function clearConversation(): void {
+  cache = [];
+  scheduleSave();
+}
