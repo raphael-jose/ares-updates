@@ -1,0 +1,80 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  ensureWhatsappServer,
+  waChats,
+  waEvents,
+  waMessages,
+  waStatus,
+} from "@/lib/agent/whatsapp";
+
+export const runtime = "nodejs";
+
+/**
+ * API do WhatsApp do ARES (fachada do servidor whatsapp-web.js).
+ * GET ?action=status|chats|messages&chat=ID&since=TS|events
+ * POST { action: "send", to, message }
+ */
+export async function GET(req: NextRequest) {
+  const action = (req.nextUrl.searchParams.get("action") ?? "status").trim();
+
+  if (action === "status") {
+    const up = await ensureWhatsappServer();
+    if (!up) {
+      return NextResponse.json(
+        { ok: false, message: "Não consegui iniciar o servidor do WhatsApp." },
+        { status: 503 },
+      );
+    }
+    const status = await waStatus();
+    return NextResponse.json({ ok: true, ...(status ?? { connected: false, qr: null }) });
+  }
+
+  if (action === "chats") {
+    const up = await ensureWhatsappServer();
+    if (!up) return NextResponse.json({ ok: false, chats: [] }, { status: 503 });
+    const chats = await waChats();
+    return NextResponse.json({ ok: true, chats });
+  }
+
+  if (action === "messages") {
+    const chat = (req.nextUrl.searchParams.get("chat") ?? "").trim();
+    if (!chat) return NextResponse.json({ ok: false, message: "Informe chat." }, { status: 400 });
+    const up = await ensureWhatsappServer();
+    if (!up) return NextResponse.json({ ok: false, message: "Servidor fora do ar." }, { status: 503 });
+    const data = await waMessages(chat);
+    if (!data) return NextResponse.json({ ok: false, message: "Conversa não encontrada." }, { status: 404 });
+    return NextResponse.json({ ok: true, ...data });
+  }
+
+  if (action === "events") {
+    const since = Number(req.nextUrl.searchParams.get("since") ?? 0) || 0;
+    const up = await ensureWhatsappServer();
+    if (!up) return NextResponse.json({ ok: false, events: [] }, { status: 503 });
+    const events = await waEvents(since);
+    return NextResponse.json({ ok: true, events });
+  }
+
+  return NextResponse.json({ ok: false, message: `Ação desconhecida: ${action}` }, { status: 400 });
+}
+
+export async function POST(req: NextRequest) {
+  const body = (await req.json().catch(() => ({}))) as { action?: unknown; to?: unknown; message?: unknown };
+  const action = String(body.action ?? "").trim();
+
+  if (action === "send") {
+    const to = String(body.to ?? "").trim();
+    const message = String(body.message ?? "").trim();
+    if (!to || !message) {
+      return NextResponse.json({ ok: false, message: "Informe to e message." }, { status: 400 });
+    }
+    const up = await ensureWhatsappServer();
+    if (!up) {
+      return NextResponse.json({ ok: false, message: "Servidor fora do ar." }, { status: 503 });
+    }
+    const { waSend } = await import("@/lib/agent/whatsapp");
+    const res = await waSend(to, message);
+    return NextResponse.json(res, res.ok ? { status: 200 } : { status: 409 });
+  }
+
+  return NextResponse.json({ ok: false, message: `Ação desconhecida: ${action}` }, { status: 400 });
+}
