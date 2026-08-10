@@ -1,5 +1,5 @@
 {
-  "versao": "20260809-234503",
+  "versao": "20260809-234910",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
@@ -117,11 +117,6 @@
       "caminho": "components/AresOrb.tsx",
       "url": "arquivos/2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a",
       "sha256": "2a557d14cbb5fa03e59cd71d7e56d2bfa6851d012236351fd79f0d697f9f369a"
-    },
-    {
-      "caminho": "docs/screenshot.png",
-      "url": "arquivos/fbf9afc7c62529890df5b7e58118f2e13deb43720af7284ef7e32605825ac862",
-      "sha256": "fbf9afc7c62529890df5b7e58118f2e13deb43720af7284ef7e32605825ac862"
     },
     {
       "caminho": "instrumentation.ts",
@@ -285,8 +280,8 @@
     },
     {
       "caminho": "lib/publicador.ts",
-      "url": "arquivos/99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296",
-      "sha256": "99ec15c152e8092985ef9c1e39fb05df1e0584ed5197ea8bc6a4939314e0e296"
+      "url": "arquivos/a53b9be6c24e9b3234f2e38cca3424520d5984af51c209d0b3627a5481df7efe",
+      "sha256": "a53b9be6c24e9b3234f2e38cca3424520d5984af51c209d0b3627a5481df7efe"
     },
     {
       "caminho": "lib/rppg.ts",
@@ -349,29 +344,9 @@
       "sha256": "7f2f19c7feb1020f1dc7f942498cb46453bba2288e16aabbfb58f1e530386f3c"
     },
     {
-      "caminho": "por.traineddata",
-      "url": "arquivos/42fab1f017aedab69b92bdecc01bbb11166cd3b177575612ee860f8e2825ece0",
-      "sha256": "42fab1f017aedab69b92bdecc01bbb11166cd3b177575612ee860f8e2825ece0"
-    },
-    {
-      "caminho": "public/maplibre/maplibre-gl-shared.mjs",
-      "url": "arquivos/7306565d651d8fdcca8ca5492ce55c1c6753468d1599144a3a914ccb51abe82b",
-      "sha256": "7306565d651d8fdcca8ca5492ce55c1c6753468d1599144a3a914ccb51abe82b"
-    },
-    {
-      "caminho": "public/maplibre/maplibre-gl-worker.mjs",
-      "url": "arquivos/f63e82e1dc5d251676ca55823adf0ef3aa06bd233674123e33bf842f953ea64c",
-      "sha256": "f63e82e1dc5d251676ca55823adf0ef3aa06bd233674123e33bf842f953ea64c"
-    },
-    {
       "caminho": "README.md",
       "url": "arquivos/8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2",
       "sha256": "8d3b47e3d130db2136c2add0d15d5a607b58bdd5899c7821886b4e1e05eacbd2"
-    },
-    {
-      "caminho": "removidos-backup-2026-08-09.zip",
-      "url": "arquivos/8ad83c66968dae13dfeadffe64f04b9fb2420f06f9cac2389c2c9cb604fe1887",
-      "sha256": "8ad83c66968dae13dfeadffe64f04b9fb2420f06f9cac2389c2c9cb604fe1887"
     },
     {
       "caminho": "scripts/ares-cli.ts",
@@ -380,18 +355,13 @@
     },
     {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/5013d0f8376f9769cdb1533a9ebc5a5e547a4445d57f45832dc2ab2b08086294",
-      "sha256": "5013d0f8376f9769cdb1533a9ebc5a5e547a4445d57f45832dc2ab2b08086294"
+      "url": "arquivos/eb52162627a8a7d19f981640e80906f84d97d5c3c45f68a247464a9383531c11",
+      "sha256": "eb52162627a8a7d19f981640e80906f84d97d5c3c45f68a247464a9383531c11"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
       "url": "arquivos/edaee3de0c76cf40ae95e512bec904e26d8b4345b02d6684bf3017edc54df032",
       "sha256": "edaee3de0c76cf40ae95e512bec904e26d8b4345b02d6684bf3017edc54df032"
-    },
-    {
-      "caminho": "scripts/yt-dlp.exe",
-      "url": "arquivos/52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
-      "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
     },
     {
       "caminho": "tsconfig.json",
