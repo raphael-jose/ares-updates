@@ -1,11 +1,12 @@
 {
-  "versao": "20260810-113848",
+  "versao": "20260810-121730",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "�rea do dev: categorize cada feedback como BUG / SUGEST�O / ELOGIO / OUTRO (borda colorida + filtro com contagens no painel)",
-    "Arthemis avisa por voz quando um feedback novo chega (mesmo com a janela de erros fechada)",
-    "Novo: badge de mensagens n�o lidas no bot�o CHAT + som de notifica��o quando uma mensagem chega com o chat fechado"
+    "Feedback agora é ilimitado: textos longos são divididos em partes e chegam COMPLETOS ao desenvolvedor (antes cortava em 2000 caracteres)",
+    "Respostas do desenvolvedor também sem limite de tamanho",
+    "Correção do arthemis.bat: o launcher agora sobe o servidor e abre o navegador corretamente",
+    "Notas de versão corrigidas — acentos preservados (encoding UTF-8 garantido na publicação)"
   ],
   "arquivos": [
     {
@@ -34,6 +35,16 @@
       "sha256": "f440f30f4ebc99f11e92911d5bc6c464e16597e52e3838b39cbab28c0e96c7d4"
     },
     {
+      "caminho": "app/api/feedback/resposta/route.ts",
+      "url": "arquivos/ed52f61f4d0451f90c1fa502a50ee322fe9d91f106fc751c1d6e4d639aed666d",
+      "sha256": "ed52f61f4d0451f90c1fa502a50ee322fe9d91f106fc751c1d6e4d639aed666d"
+    },
+    {
+      "caminho": "app/api/feedback/respostas/route.ts",
+      "url": "arquivos/d6a9a54c2b0b0ee6b54a6e900ef5a99512b640be817cb085e726f54d1dd6b7ae",
+      "sha256": "d6a9a54c2b0b0ee6b54a6e900ef5a99512b640be817cb085e726f54d1dd6b7ae"
+    },
+    {
       "caminho": "app/api/feedback/route.ts",
       "url": "arquivos/43d98712a3662af94a61ebea6e1ac07e8436dac7a69ea304cf8f8d5c25aafae5",
       "sha256": "43d98712a3662af94a61ebea6e1ac07e8436dac7a69ea304cf8f8d5c25aafae5"
@@ -60,8 +71,8 @@
     },
     {
       "caminho": "app/api/publish/route.ts",
-      "url": "arquivos/5962441916baed6d0399e7febd7f865dad796d463b05ce5350020690c19994f2",
-      "sha256": "5962441916baed6d0399e7febd7f865dad796d463b05ce5350020690c19994f2"
+      "url": "arquivos/849f0aa9a00264fdc4040816fbc320e65cf030dec3036b51f77738855148724f",
+      "sha256": "849f0aa9a00264fdc4040816fbc320e65cf030dec3036b51f77738855148724f"
     },
     {
       "caminho": "app/api/resumo/route.ts",
@@ -95,8 +106,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/a7a6f017638c82c85b2e9cfd080605b9c0695ff79e183458dd83cc0a4fb752b2",
-      "sha256": "a7a6f017638c82c85b2e9cfd080605b9c0695ff79e183458dd83cc0a4fb752b2"
+      "url": "arquivos/923921f0290e4ae542848abec0cd71521e72f2f79b34ec323f3ddc2d526ab54d",
+      "sha256": "923921f0290e4ae542848abec0cd71521e72f2f79b34ec323f3ddc2d526ab54d"
     },
     {
       "caminho": "app/icon.svg",
@@ -115,8 +126,8 @@
     },
     {
       "caminho": "arthemis.bat",
-      "url": "arquivos/5bc758a180dbe85b3805f15e43cf2337ae679512fe02469be7d640803c7432e9",
-      "sha256": "5bc758a180dbe85b3805f15e43cf2337ae679512fe02469be7d640803c7432e9"
+      "url": "arquivos/e62d2b7bcae327166f3a96d90a225c158632408a85def702f53d6010ea78a693",
+      "sha256": "e62d2b7bcae327166f3a96d90a225c158632408a85def702f53d6010ea78a693"
     },
     {
       "caminho": "COMANDOS.md",
@@ -125,8 +136,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/0b1f2b422094f7d1d149e4340d32cb03543a7294297b91dbab2475a9d2c6d4f9",
-      "sha256": "0b1f2b422094f7d1d149e4340d32cb03543a7294297b91dbab2475a9d2c6d4f9"
+      "url": "arquivos/24636f5126ef6740f0c70e8070055516c9fd31eeebae44b0ab87d473e6bc7279",
+      "sha256": "24636f5126ef6740f0c70e8070055516c9fd31eeebae44b0ab87d473e6bc7279"
     },
     {
       "caminho": "instrumentation.ts",
@@ -155,8 +166,8 @@
     },
     {
       "caminho": "lib/agent/errosMqtt.ts",
-      "url": "arquivos/c038e08a38c1affa7ec4e3e79a911e128e972477a3ca89670b97f9d76a913797",
-      "sha256": "c038e08a38c1affa7ec4e3e79a911e128e972477a3ca89670b97f9d76a913797"
+      "url": "arquivos/81cb23d585dfc438ed807c46e043e5783f7663da1ca35738449a7655a4dea3c3",
+      "sha256": "81cb23d585dfc438ed807c46e043e5783f7663da1ca35738449a7655a4dea3c3"
     },
     {
       "caminho": "lib/agent/executor.ts",
@@ -165,8 +176,8 @@
     },
     {
       "caminho": "lib/agent/feedback.ts",
-      "url": "arquivos/f97b474c8409c7614f723a07605a7796f2220bc7f7d2e53ce9a7e7f1bbead2c7",
-      "sha256": "f97b474c8409c7614f723a07605a7796f2220bc7f7d2e53ce9a7e7f1bbead2c7"
+      "url": "arquivos/abc234b21f57c150eb6062a6536e2de5a6b2a811ef95a1b17fae1acf4ba4e8a8",
+      "sha256": "abc234b21f57c150eb6062a6536e2de5a6b2a811ef95a1b17fae1acf4ba4e8a8"
     },
     {
       "caminho": "lib/agent/finance.ts",
@@ -375,8 +386,8 @@
     },
     {
       "caminho": "scripts/publicar-atualizacao.ts",
-      "url": "arquivos/75d439e65f19d417e0c92f75fa1cbed28f87c9056893aa9afc89a0a16050e411",
-      "sha256": "75d439e65f19d417e0c92f75fa1cbed28f87c9056893aa9afc89a0a16050e411"
+      "url": "arquivos/52707a229521d7e0d6835b139dbb93926d2c9eb52d406dc0c2031416f3fdf8cc",
+      "sha256": "52707a229521d7e0d6835b139dbb93926d2c9eb52d406dc0c2031416f3fdf8cc"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
