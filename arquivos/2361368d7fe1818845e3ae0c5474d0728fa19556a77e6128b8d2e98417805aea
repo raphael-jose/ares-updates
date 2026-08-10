@@ -1,0 +1,149 @@
+/**
+ * Configurações do ARES — banco de configurações centralizado.
+ *
+ * Persiste em `~/.ares/settings.json` (o mesmo diretório de dados do app).
+ * O painel CONFIGURAÇÕES da interface lê/escreve via /api/settings, e os
+ * módulos do servidor (atualizador, telemetria MQTT) consultam AQUI primeiro
+ * — com fallback para o .env — para que as mudanças feitas na UI tenham
+ * efeito real, não só visual.
+ *
+ * A memória da IA (lib/agent/memory.ts) inclui um resumo destas
+ * configurações, para que a Arthemis consulte ("quais são minhas
+ * configurações?", "a telemetria está ligada?") e responda com o estado real.
+ *
+ * Prioridade: valor persistido em settings.json > .env > padrão interno.
+ */
+
+import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
+import path from "path";
+
+/** Configurações completas do app. */
+export interface Configuracoes {
+  /** Modo ECO do orbe (menos partículas — indicado p/ hardware fraco). */
+  eco: boolean;
+  /** Preferências de voz: velocidade (0.5–2), tom (-20..20), voz. */
+  voz: { rate: number; pitch: number; voice: string };
+  /** Minutos de antecedência do alerta da agenda (1–60). */
+  alertaAntes: number;
+  /** Intervalo da verificação de atualizações em minutos (1–60). */
+  intervaloAtualizacaoMin: number;
+  /** Feed de atualizações (URL base do manifest — avançado). */
+  feedAtualizacaoUrl: string;
+  /** Enviar telemetria/erros/feedback ao broker (o dev recebe). */
+  telemetriaEnviar: boolean;
+  /** Receber telemetria/erros/feedback (máquina do desenvolvedor). */
+  telemetriaReceber: boolean;
+  /** Painel de comandos recolhido por padrão. */
+  controlesRecolhidos: boolean;
+}
+
+export type PatchConfiguracoes = Partial<Configuracoes>;
+
+const DIR = path.join(os.homedir(), ".ares");
+const FILE = path.join(DIR, "settings.json");
+
+/** Padrões internos (valores de fábrica — o .env e o disco sobrepõem). */
+function padrao(): Configuracoes {
+  const intervaloEnv = Number(process.env.ARES_UPDATE_INTERVAL_MIN);
+  const receberEnv = process.env.ARES_ERROS_RECEBER === "1" || process.env.ARES_DEV_MODE === "1";
+  return {
+    eco: false,
+    voz: { rate: 1, pitch: -4, voice: "feminina" },
+    alertaAntes: 5,
+    intervaloAtualizacaoMin: Number.isFinite(intervaloEnv) && intervaloEnv > 0 ? intervaloEnv : 1,
+    feedAtualizacaoUrl: (process.env.ARES_UPDATE_URL || "").trim(),
+    telemetriaEnviar: (process.env.ARES_ERROS_ENVIAR || "1") !== "0",
+    telemetriaReceber: receberEnv,
+    controlesRecolhidos: false,
+  };
+}
+
+function lerDisco(): Partial<Configuracoes> | null {
+  try {
+    if (fs.existsSync(FILE)) {
+      const raw = JSON.parse(fs.readFileSync(FILE, "utf8")) as unknown;
+      if (raw && typeof raw === "object") return raw as Partial<Configuracoes>;
+    }
+  } catch {
+    /* arquivo corrompido/ausente — usa padrões */
+  }
+  return null;
+}
+
+/** Configurações atuais (disco > .env > padrão). Lê do disco a cada chamada
+ *  para que mudanças da UI valham imediatamente (arquivo pequeno). */
+export function getSettings(): Configuracoes {
+  const base = padrao();
+  const disco = lerDisco();
+  if (!disco) return base;
+  return {
+    ...base,
+    ...disco,
+    voz: { ...base.voz, ...(disco.voz ?? {}) },
+  };
+}
+
+let writeQueue: Promise<void> = Promise.resolve();
+
+/** Persiste um patch validado de configurações no disco (best-effort). */
+export function salvarSettings(patch: PatchConfiguracoes): Configuracoes {
+  const atual = getSettings();
+  const proximo: Configuracoes = { ...atual, ...patch, voz: { ...atual.voz, ...(patch.voz ?? {}) } };
+
+  // Validação de sanidade dos valores numéricos/boolianos.
+  proximo.alertaAntes = Math.min(60, Math.max(1, Math.round(Number(proximo.alertaAntes) || 5)));
+  proximo.intervaloAtualizacaoMin = Math.min(60, Math.max(1, Math.round(Number(proximo.intervaloAtualizacaoMin) || 1)));
+  proximo.voz.rate = Math.min(2, Math.max(0.5, Number(proximo.voz.rate) || 1));
+  proximo.voz.pitch = Math.min(20, Math.max(-20, Number(proximo.voz.pitch) || 0));
+  proximo.voz.voice = proximo.voz.voice === "masculina" ? "masculina" : "feminina";
+  proximo.feedAtualizacaoUrl = String(proximo.feedAtualizacaoUrl ?? "").trim().slice(0, 300);
+  proximo.eco = Boolean(proximo.eco);
+  proximo.telemetriaEnviar = Boolean(proximo.telemetriaEnviar);
+  proximo.telemetriaReceber = Boolean(proximo.telemetriaReceber);
+  proximo.controlesRecolhidos = Boolean(proximo.controlesRecolhidos);
+
+  writeQueue = writeQueue.then(async () => {
+    try {
+      await fsp.mkdir(DIR, { recursive: true });
+      await fsp.writeFile(FILE, JSON.stringify(proximo, null, 2), "utf8");
+    } catch {
+      /* best-effort */
+    }
+  });
+  return proximo;
+}
+
+/** Id da instalação (persistido em ~/.ares/instalacao.json). */
+export function idInstalacaoSettings(): string {
+  try {
+    const p = path.join(DIR, "instalacao.json");
+    if (fs.existsSync(p)) {
+      const j = JSON.parse(fs.readFileSync(p, "utf8")) as { id?: unknown };
+      if (typeof j.id === "string" && j.id) return j.id;
+    }
+    const id = `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.mkdirSync(DIR, { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ id }, null, 2), "utf8");
+    return id;
+  } catch {
+    return `inst-${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
+
+/** Resumo legível das configurações — usado pela memória da IA e pela UI. */
+export function resumoConfiguracoes(cfg?: Configuracoes): string {
+  const c = cfg ?? getSettings();
+  const voz = c.voz.voice === "masculina" ? "masculina" : "feminina";
+  return [
+    `Modo ECO do orbe: ${c.eco ? "ligado" : "desligado"}`,
+    `Voz: ${voz}, velocidade ${c.voz.rate.toFixed(1)}x, tom ${c.voz.pitch > 0 ? "+" : ""}${c.voz.pitch} Hz`,
+    `Alerta de agenda: ${c.alertaAntes} min antes`,
+    `Verificação de atualizações: a cada ${c.intervaloAtualizacaoMin} min`,
+    c.feedAtualizacaoUrl ? `Feed de atualizações: ${c.feedAtualizacaoUrl}` : "Feed de atualizações: desligado",
+    `Telemetria (erros/feedback): ${c.telemetriaEnviar ? "enviando" : "desligada"}`,
+    c.telemetriaReceber ? "Recepção de telemetria do dev: ligada" : "Recepção de telemetria do dev: desligada",
+    `Painel de comandos recolhido: ${c.controlesRecolhidos ? "sim" : "não"}`,
+  ].join("\n");
+}
