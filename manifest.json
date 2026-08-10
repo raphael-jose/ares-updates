@@ -1,12 +1,17 @@
 {
-  "versao": "20260809-224846",
+  "versao": "20260809-232038",
   "npm": false,
   "exigeReinicio": false,
   "arquivos": [
     {
-      "caminho": "lib/assistant.ts",
-      "url": "arquivos/8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48",
-      "sha256": "8b97caeb53880cd3f64cd5388fa3395ee2c9bc1e25bd5c924018c04d32773f48"
+      "caminho": "lib/agent/tools.ts",
+      "url": "arquivos/28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a",
+      "sha256": "28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a"
+    },
+    {
+      "caminho": "lib/voice.ts",
+      "url": "arquivos/94c39ab86e41f34b9723835ed0e0926126343aefd0a79675d4a11df4a14e123d",
+      "sha256": "94c39ab86e41f34b9723835ed0e0926126343aefd0a79675d4a11df4a14e123d"
     }
   ]
 }
