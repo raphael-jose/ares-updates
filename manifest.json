@@ -1,11 +1,7 @@
 {
-  "versao": "20260810-153757",
+  "versao": "20260810-153847",
   "npm": false,
-  "exigeReinicio": false,
-  "notas": [
-    "Chat P2P: entrega em tempo real - mensagens que chegam durante o handshake sao guardadas e entregues (fila pre-sessao), e abrir o chat re-dispara a conexao de contatos desconectados.",
-    "Chat P2P: status honesto e diagnostico NAT - presenca do broker nao e mais confundida com conexao; contato presente sem canal mostra 'conectando', com dica de NAT e botao reconectar (sem remover o contato)."
-  ],
+  "exigeReinicio": true,
   "arquivos": [
     {
       "caminho": "app/api/agenda/route.ts",
