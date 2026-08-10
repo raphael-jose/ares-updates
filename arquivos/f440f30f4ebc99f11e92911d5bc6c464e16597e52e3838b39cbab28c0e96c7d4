@@ -1,0 +1,16 @@
+import { NextRequest, NextResponse } from "next/server";
+import { limparErros, listarErros } from "@/lib/agent/erros";
+
+export const runtime = "nodejs";
+
+/** Registro de Ações: GET ?limite=50 → tabela de falhas (mais recentes primeiro). */
+export async function GET(req: NextRequest) {
+  const limite = Math.min(Math.max(Number(req.nextUrl.searchParams.get("limite") ?? 100) || 100, 1), 300);
+  return NextResponse.json({ ok: true, erros: listarErros(limite) });
+}
+
+/** DELETE → limpa a tabela inteira. */
+export async function DELETE() {
+  const res = limparErros();
+  return NextResponse.json(res);
+}
