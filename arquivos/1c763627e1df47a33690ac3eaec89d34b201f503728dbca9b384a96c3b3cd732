@@ -1,0 +1,72 @@
+import { NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+
+/**
+ * Configuração ICE (STUN + TURN) para o WebRTC do chat P2P.
+ *
+ * Lê do .env (server-side, nunca no bundle):
+ *   TURN_URL        ex.: turn:turn.exemplo.com:3478?transport=udp
+ *   TURN_USERNAME   usuário do relay TURN
+ *   TURN_PASSWORD   senha do relay TURN
+ *   ARES_TURN_PUBLICO   "0" desliga o relay público de fallback (padrão: ligado)
+ *
+ * Prioridade:
+ *   1. TURN próprio no .env (ex.: coturn num VPS) → usa SÓ ele.
+ *   2. Sem TURN próprio → fallback para o relay público Open Relay
+ *      (openrelay.metered.ca — mesmo serviço usado por Nextcloud/Matrix/Jitsi,
+ *      20 GB/mês grátis, portas 80/443 que passam por quase todo firewall).
+ *
+ * Por que o fallback público é seguro aqui: todo o tráfego do chat é
+ * criptografado de ponta a ponta (AES-GCM via ECDH) ANTES de sair da máquina
+ * — o relay só vê ciphertext e não consegue ler nada. Sem esse fallback, a
+ * conexão entre casas diferentes falha em NAT simétrico/CGNAT (só STUN não
+ * atravessa); com relay, o ICE tem o caminho "relay" e conecta em qualquer
+ * rede.
+ *
+ * Nota: como o navegador precisa das credenciais para o ICE, elas são
+ * expostas em runtime para a própria instância — o mesmo vale para qualquer
+ * app WebRTC (Google Meet etc.). Não há segredo que escape do navegador aqui.
+ */
+
+/** Relay público gratuito (Open Relay Project / Metered). */
+const TURN_PUBLICO: RTCIceServer = {
+  urls: [
+    "turn:openrelay.metered.ca:80?transport=udp",
+    "turn:openrelay.metered.ca:443?transport=tcp",
+    "turns:openrelay.metered.ca:443?transport=tcp",
+  ],
+  username: "openrelayproject",
+  credential: "openrelayproject",
+};
+
+export async function GET() {
+  const url = process.env.TURN_URL?.trim();
+  const username = process.env.TURN_USERNAME?.trim();
+  const password = process.env.TURN_PASSWORD?.trim();
+  const usarPublico = process.env.ARES_TURN_PUBLICO?.trim() !== "0";
+
+  const iceServers: RTCIceServer[] = [
+    {
+      urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+    },
+  ];
+
+  let turnAtivo = false;
+  if (url && username && password) {
+    // Relay PRÓPRIO (prioridade 1) — só ele, como antes.
+    iceServers.push({ urls: [url], username, credential: password });
+    turnAtivo = true;
+  } else if (usarPublico) {
+    // Fallback público (prioridade 2) — garante conexão entre casas já hoje.
+    iceServers.push(TURN_PUBLICO);
+    turnAtivo = true;
+  }
+
+  return NextResponse.json({
+    ok: true,
+    turnAtivo,
+    relay: url ? "proprio" : usarPublico ? "publico" : "nenhum",
+    iceServers,
+  });
+}
