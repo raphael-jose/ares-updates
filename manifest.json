@@ -1,11 +1,12 @@
 {
-  "versao": "20260810-131123",
+  "versao": "20260810-134628",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "Painel de voz (velocidade, tom, feminina/masculina) removido do HUD — os controles agora vivem no menu CONFIGURAÇÕES (sem duplicidade)",
-    "Privacidade: feed de atualizações, id da instalação e broker não aparecem mais na interface nem na API do navegador",
-    "Fingerprint ocultado da interface (cartão de identidade e verificação de contato)"
+    "Servidor 100% em segundo plano: nenhuma janela de terminal abre ao instalar atualizações nem ao iniciar o app",
+    "Acesso rápido no menu CONFIGURAÇÕES: finanças, erros e memória agora abrem pelo CONFIG",
+    "A Arthemis responde 'o que há de novo?': ela fala as novidades das últimas atualizações",
+    "Opção 'Receber telemetria do dev' só aparece na máquina do desenvolvedor"
   ],
   "arquivos": [
     {
@@ -110,8 +111,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/406b4e2b469b15a53908da98f45632ed2e688c963e1ab59d322b6fad17268ea2",
-      "sha256": "406b4e2b469b15a53908da98f45632ed2e688c963e1ab59d322b6fad17268ea2"
+      "url": "arquivos/b5d31fcf18adbfd504c9c77c94309c4df864d066c56e2acd215f381d7b8ddce6",
+      "sha256": "b5d31fcf18adbfd504c9c77c94309c4df864d066c56e2acd215f381d7b8ddce6"
     },
     {
       "caminho": "app/icon.svg",
@@ -130,8 +131,8 @@
     },
     {
       "caminho": "arthemis.bat",
-      "url": "arquivos/e62d2b7bcae327166f3a96d90a225c158632408a85def702f53d6010ea78a693",
-      "sha256": "e62d2b7bcae327166f3a96d90a225c158632408a85def702f53d6010ea78a693"
+      "url": "arquivos/1f7d3d0a4c479f141697ed12c0f0a51b8393161c08380c52edac1a2f3b373580",
+      "sha256": "1f7d3d0a4c479f141697ed12c0f0a51b8393161c08380c52edac1a2f3b373580"
     },
     {
       "caminho": "COMANDOS.md",
@@ -140,8 +141,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/cb8ff685beb8bee112c56fd6c53981a19b50cd3aafce7ef848db6d84db2f0188",
-      "sha256": "cb8ff685beb8bee112c56fd6c53981a19b50cd3aafce7ef848db6d84db2f0188"
+      "url": "arquivos/26fc29594709ee5c2fda142a08e2515a1f804b88197d02274cf776212891f619",
+      "sha256": "26fc29594709ee5c2fda142a08e2515a1f804b88197d02274cf776212891f619"
     },
     {
       "caminho": "instrumentation.ts",
@@ -255,13 +256,13 @@
     },
     {
       "caminho": "lib/agent/tools.ts",
-      "url": "arquivos/28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a",
-      "sha256": "28fa124f40686e700b2887b5e1857762c12a99acc564673c7c5583badb977c8a"
+      "url": "arquivos/9b77580e2dc9f6f6c2d615a58fa0fb0867b19f69f6ca52939f1cd346dcdf1e35",
+      "sha256": "9b77580e2dc9f6f6c2d615a58fa0fb0867b19f69f6ca52939f1cd346dcdf1e35"
     },
     {
       "caminho": "lib/agent/types.ts",
-      "url": "arquivos/ddb0c2193d4575295fbf0b233fb03af1eba4cf8232d07c87167aa50e5fde3aea",
-      "sha256": "ddb0c2193d4575295fbf0b233fb03af1eba4cf8232d07c87167aa50e5fde3aea"
+      "url": "arquivos/e56769bdfaa7c9da4caf66bc786d4224bb7327ad75b60d12ed7fbf2210536844",
+      "sha256": "e56769bdfaa7c9da4caf66bc786d4224bb7327ad75b60d12ed7fbf2210536844"
     },
     {
       "caminho": "lib/agent/units.ts",
@@ -290,8 +291,8 @@
     },
     {
       "caminho": "lib/atualizador.ts",
-      "url": "arquivos/01545721d34799cf122d59ded4a1e729ded0c68ba5aa12ee9dc4e2b054f5151d",
-      "sha256": "01545721d34799cf122d59ded4a1e729ded0c68ba5aa12ee9dc4e2b054f5151d"
+      "url": "arquivos/8089f2582d44a49fd018e97a02c9b841ea97c92584e6fa24be940aa5d492693b",
+      "sha256": "8089f2582d44a49fd018e97a02c9b841ea97c92584e6fa24be940aa5d492693b"
     },
     {
       "caminho": "lib/bilingual.ts",
@@ -397,6 +398,11 @@
       "caminho": "scripts/publicar-atualizacao.ts",
       "url": "arquivos/52707a229521d7e0d6835b139dbb93926d2c9eb52d406dc0c2031416f3fdf8cc",
       "sha256": "52707a229521d7e0d6835b139dbb93926d2c9eb52d406dc0c2031416f3fdf8cc"
+    },
+    {
+      "caminho": "scripts/subir-servidor.js",
+      "url": "arquivos/4f51360d88d59adb1655e2afa2535e557d11f01952ad3a3aba583c3f529f1489",
+      "sha256": "4f51360d88d59adb1655e2afa2535e557d11f01952ad3a3aba583c3f529f1489"
     },
     {
       "caminho": "scripts/whatsapp-server.ts",
