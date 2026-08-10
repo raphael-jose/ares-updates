@@ -1,0 +1,1641 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+import { ORB_PALETTES } from "./theme";
+
+/** Estado emocional do orbe: muda brilho, rotação e cor conforme o contexto. */
+export type OrbEmotion =
+  | "idle"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  | "confirming"
+  | "error"
+  | "happy"
+  | "alerta";
+
+export interface OrbSceneApi {
+  /** Rotate the camera around the orb by the given angles (radians). */
+  rotateBy(deltaTheta: number, deltaPhi: number): void;
+  /** Multiply the camera distance by `factor` (<1 zooms in, >1 zooms out). */
+  zoomBy(factor: number): void;
+  zoomIn(): void;
+  zoomOut(): void;
+  resetView(): void;
+  /** Muda a emoção do orbe (brilho, pulsação, cor). */
+  setEmotion(emotion: OrbEmotion): void;
+  /** Informa o BPM atual do rPPG (null = sem leitura). Alimenta a pulsação
+   *  de coração e a reação das partículas na emoção “alerta”. */
+  setBpm(bpm: number | null): void;
+  /** Informa o texto que está sendo falado (ou null para parar). O orbe
+   *  divide em frases e dispara uma rajada de pulsos neurais no início de cada
+   *  uma, decaindo até a próxima — “pensa” a resposta frase por frase. */
+  setSpeech(text: string | null): void;
+  dispose(): void;
+}
+
+const HOME_POSITION = new THREE.Vector3(0, 0.5, 5.5);
+const MIN_DISTANCE = 0.6;
+const MAX_DISTANCE = 40;
+
+const GPU_FRACA_RE = /swiftshader|llvmpipe|software|hd graphics|uhd graphics/i;
+
+/** GPU declarada fraca (Intel HD Graphics / render por software) por um contexto WebGL. */
+function gpuEhFraca(gl: WebGLRenderingContext): boolean {
+  const ext = gl.getExtension("WEBGL_debug_renderer_info");
+  if (!ext) return false;
+  return GPU_FRACA_RE.test(String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)));
+}
+
+// Resultado do sniff memoizado: o contexto descartável é criado UMA vez por
+// página, não a cada criação de cena.
+let gpuFracaCache: boolean | null = null;
+
+/**
+ * Sniffa a GPU com um contexto WebGL descartável (e libera na hora). Roda ANTES
+ * de criar o renderer principal, para o antialias já nascer desligado no eco —
+ * MSAA é o maior custo de uma iGPU antiga (Intel HD Graphics).
+ */
+function gpuDeclaradaFraca(): boolean {
+  if (gpuFracaCache !== null) return gpuFracaCache;
+  try {
+    const c = document.createElement("canvas");
+    const gl = (c.getContext("webgl") ||
+      c.getContext("experimental-webgl")) as WebGLRenderingContext | null;
+    if (!gl) {
+      gpuFracaCache = true; // sem WebGL → render por software
+      return true;
+    }
+    try {
+      gpuFracaCache = gpuEhFraca(gl);
+    } finally {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+  } catch {
+    gpuFracaCache = false; // sem informação de GPU → assume capaz
+  }
+  return gpuFracaCache;
+}
+
+/** Detecta hardware modesto (iGPU antiga, pouca RAM/CPU) para o modo econômico. */
+function detectEcoMode(): boolean {
+  try {
+    if (typeof window === "undefined") return false;
+    // A URL tem prioridade sobre a preferência salva — para eco=0 E eco=1
+    const ecoUrl = window.location.search.match(/[?&]eco=([01])(?=&|$)/)?.[1];
+    if (ecoUrl) return ecoUrl === "1";
+    // Override explícito persistido: localStorage ares-eco=1/0
+    const saved = window.localStorage.getItem("ares-eco");
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+    const nav = navigator as Navigator & { deviceMemory?: number };
+    const cores = nav.hardwareConcurrency ?? 8;
+    const mem = nav.deviceMemory ?? 8;
+    // i3/4 núcleos + até 4 GB declarados no navegador → modo econômico
+    if (cores <= 4 && mem <= 4) return true;
+    // Heurística inconclusiva (muitos núcleos/RAM): decide pela GPU declarada
+    return gpuDeclaradaFraca();
+  } catch {
+    return false;
+  }
+}
+
+export function createOrbScene(
+  container: HTMLElement,
+  forceEco = false,
+): OrbSceneApi {
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  const p = ORB_PALETTES;
+
+  // Tema único (HUD): réplica do vídeo de referência (globo oco de partículas
+  // brancas). Só o point-cloud fica visível — o resto da cena sai (bloco lá
+  // embaixo).
+
+  // ——— SCENE ———
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 500);
+  camera.position.copy(HOME_POSITION);
+
+  // Modo econômico: forçado por env/URL ou detectado (iGPU fraca + pouca RAM/CPU).
+  // Reduz o custo onde uma iGPU antiga mais sofre: resolução do bloom, antialias
+  // e a quantidade de sprites/partículas/debris. O sniff da GPU roda ANTES do
+  // renderer, então o antialias já nasce desligado no eco.
+  const ECO = forceEco || detectEcoMode();
+  const renderer = new THREE.WebGLRenderer({
+    antialias: !ECO,
+    // Máquinas com GPU dupla (iGPU + dGPU) usam a placa de baixo consumo.
+    powerPreference: "low-power",
+  });
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, ECO ? 1 : 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.8;
+  container.appendChild(renderer.domElement);
+
+  // Iluminação para o emblema (só materiais Phong/Standard usam luz; o resto
+  // do orbe usa MeshBasic aditivo e não é afetado). Sem luz, o crescente e a
+  // estrela nunca terão sombreamento — por isso pareciam uma chapa plana.
+  const ambLight = new THREE.AmbientLight(0xffffff, 0.45);
+  scene.add(ambLight);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.25);
+  keyLight.position.set(2.5, 3.5, 5);
+  scene.add(keyLight);
+  // Luzes neutras (brancas): com a paleta preto e branco, nenhuma luz tinge
+  // o orbe nem o emblema.
+  const rimLight = new THREE.DirectionalLight(0xffffff, 0.35);
+  rimLight.position.set(-3, -1.5, 2);
+  scene.add(rimLight);
+  const rimLightRight = new THREE.DirectionalLight(0xffffff, 0.35);
+  rimLightRight.position.set(3, -1.5, 2);
+  scene.add(rimLightRight);
+
+  // ——— POST PROCESSING ———
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+
+  // Bloom original (threshold 0.2): só brilhos fortes passam e estouram suave.
+  const bloom = new UnrealBloomPass(
+    new THREE.Vector2(width, height),
+    1.62,
+    0.4,
+    0.2,
+  );
+  // Eco: bloom em 35% da resolução (~12% do fill-rate original) — brilho
+  // visível ainda, mas ~metade do custo do bloom do eco anterior (0.5).
+  if (ECO) bloom.resolution.setScalar(0.35);
+  // Globo de partículas: bloom suave e threshold alto — só as cristas brilham
+  // e o centro do globo continua oco, como no vídeo. Com o threshold baixo
+  // (0.2) e strength alto, o bloom estourava a casca inteira numa bola branca
+  // sólida (medido no smoke test). Brilho contido: sem o brilho intenso que
+  // estourava a casca, centro oco preservado.
+  bloom.threshold = 0.55;
+  bloom.radius = 0.2;
+  composer.addPass(bloom);
+
+  // Chromatic aberration + color grade shader
+  const chromaticShader = {
+    uniforms: {
+      tDiffuse: { value: null },
+      uTime: { value: 0 },
+      uIntensity: { value: 0.003 },
+      uRedTint: { value: 0.0 },
+      // Grade cromático: multiplicadores [r,g,b] do color grade.
+      // Preto e branco puro: grade neutra [1,1,1], sem viés de cor.
+      uGrade: {
+        value: new THREE.Vector3(1, 1, 1),
+      },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D tDiffuse;
+      uniform float uTime;
+      uniform float uIntensity;
+      uniform float uRedTint;
+      uniform vec3 uGrade;
+      varying vec2 vUv;
+      void main() {
+        vec2 dir = vUv - vec2(0.5);
+        float d = length(dir);
+        float offset = uIntensity * d;
+        // Slight flicker
+        float flicker = 1.0 + 0.02 * sin(uTime * 30.0) * sin(uTime * 7.3);
+        vec4 cr = texture2D(tDiffuse, vUv + dir * offset);
+        vec4 cg = texture2D(tDiffuse, vUv);
+        vec4 cb = texture2D(tDiffuse, vUv - dir * offset * 0.5);
+        gl_FragColor = vec4(cr.r * uGrade.r, cg.g * uGrade.g, cb.b * uGrade.b, 1.0) * flicker;
+        // Neutral grade (preto e branco puro)
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(${p.push[0]}, ${p.push[1]}, ${p.push[2]}), 0.3);
+        // Emotional tint: alerts/errors shift to a warning red
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0, 0.15, 0.08), uRedTint * 0.4);
+      }
+    `,
+  };
+  const chromaticPass = new ShaderPass(chromaticShader);
+  composer.addPass(chromaticPass);
+
+  // Controls
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.04;
+  controls.minDistance = MIN_DISTANCE;
+  controls.maxDistance = MAX_DISTANCE;
+  controls.zoomSpeed = 1.4;
+  controls.enablePan = false;
+
+  // ——— COLORS (do tema ativo) ———
+  const C_BRIGHT = p.bright;
+  const C_MID = p.mid;
+  const C_DIM = p.dim;
+  const C_FAINT = p.faint;
+  const C_HOT = p.hot;
+
+  // ——— ORB ROOT ———
+  // Every part of the orb (shells, core, orbiting debris, text, dust, rings)
+  // lives under this group.
+  const orbGroup = new THREE.Group();
+  scene.add(orbGroup);
+
+  // ——— MATERIAL HELPERS ———
+  function lineMat(color: number, opacity = 1) {
+    return new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+  }
+
+  // ——— UTILITY: Create ring at latitude ———
+  function latRing(radius: number, lat: number, segs = 120) {
+    const r = radius * Math.cos(lat);
+    const y = radius * Math.sin(lat);
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      pts.push(new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)));
+    }
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+
+  // ——— UTILITY: Create meridian ———
+  function meridian(radius: number, lon: number, segs = 120) {
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= segs; i++) {
+      const lat = (i / segs) * Math.PI - Math.PI / 2;
+      pts.push(
+        new THREE.Vector3(
+          radius * Math.cos(lat) * Math.cos(lon),
+          radius * Math.sin(lat),
+          radius * Math.cos(lat) * Math.sin(lon),
+        ),
+      );
+    }
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+
+  // ═══════════════════════════════════════════════
+  // LAYER 1: OUTER SHELL — dense wireframe grid
+  // ═══════════════════════════════════════════════
+  const outerShell = new THREE.Group();
+  const R1 = 2.0;
+
+  // Dense latitude rings (30+)
+  for (let i = -15; i <= 15; i++) {
+    const lat = (i / 15) * (Math.PI / 2) * 0.95;
+    const opacity = i % 3 === 0 ? 0.5 : 0.12;
+    const color = i % 3 === 0 ? C_MID : C_FAINT;
+    outerShell.add(new THREE.Line(latRing(R1, lat), lineMat(color, opacity)));
+  }
+
+  // Dense meridians (24)
+  for (let i = 0; i < 24; i++) {
+    const lon = (i / 24) * Math.PI * 2;
+    const isMajor = i % 6 === 0;
+    outerShell.add(
+      new THREE.Line(
+        meridian(R1, lon),
+        lineMat(isMajor ? C_MID : C_FAINT, isMajor ? 0.6 : 0.1),
+      ),
+    );
+  }
+
+  // 4 bright cross meridians (the "plus" shape) — wide bands
+  const CROSS_LINES = ECO ? 6 : 18;
+  const CROSS_SPREAD = 0.25; // radians total width
+  for (let i = 0; i < 4; i++) {
+    const lon = (i / 4) * Math.PI * 2;
+    for (let j = 0; j < CROSS_LINES; j++) {
+      const t = (j / (CROSS_LINES - 1)) * 2 - 1; // -1 to 1
+      const offset = (t * CROSS_SPREAD) / 2;
+      const falloff = 1 - Math.abs(t) * 0.7; // brighter at center, dimmer at edges
+      const opacity = 0.85 * falloff;
+      const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
+      outerShell.add(
+        new THREE.Line(meridian(R1, lon + offset, 200), lineMat(color, opacity)),
+      );
+    }
+  }
+
+  // Bright equator band — wide
+  const EQ_LINES = ECO ? 6 : 20;
+  const EQ_SPREAD = 0.35;
+  for (let j = 0; j < EQ_LINES; j++) {
+    const t = (j / (EQ_LINES - 1)) * 2 - 1;
+    const offset = (t * EQ_SPREAD) / 2;
+    const falloff = 1 - Math.abs(t) * 0.65;
+    const opacity = 0.8 * falloff;
+    const color = Math.abs(t) < 0.3 ? C_BRIGHT : C_MID;
+    outerShell.add(
+      new THREE.Line(latRing(R1, offset, 200), lineMat(color, opacity)),
+    );
+  }
+
+  orbGroup.add(outerShell);
+
+  // ═══════════════════════════════════════════════
+  // LAYER 2: GRID PANELS on the sphere surface
+  // ═══════════════════════════════════════════════
+  const panelGroup = new THREE.Group();
+
+  function createSpherePanel(
+    latCenter: number,
+    lonCenter: number,
+    latSpan: number,
+    lonSpan: number,
+    radius: number,
+    divisions = 4,
+  ) {
+    const group = new THREE.Group();
+    const mat = lineMat(C_DIM, 0.25);
+
+    // horizontal lines
+    for (let i = 0; i <= divisions; i++) {
+      const lat = latCenter - latSpan / 2 + (i / divisions) * latSpan;
+      const pts: THREE.Vector3[] = [];
+      for (let j = 0; j <= divisions * 4; j++) {
+        const lon = lonCenter - lonSpan / 2 + (j / (divisions * 4)) * lonSpan;
+        pts.push(
+          new THREE.Vector3(
+            radius * Math.cos(lat) * Math.cos(lon),
+            radius * Math.sin(lat),
+            radius * Math.cos(lat) * Math.sin(lon),
+          ),
+        );
+      }
+      group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+    }
+
+    // vertical lines
+    for (let j = 0; j <= divisions; j++) {
+      const lon = lonCenter - lonSpan / 2 + (j / divisions) * lonSpan;
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i <= divisions * 4; i++) {
+        const lat = latCenter - latSpan / 2 + (i / (divisions * 4)) * latSpan;
+        pts.push(
+          new THREE.Vector3(
+            radius * Math.cos(lat) * Math.cos(lon),
+            radius * Math.sin(lat),
+            radius * Math.cos(lat) * Math.sin(lon),
+          ),
+        );
+      }
+      group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+    }
+
+    return group;
+  }
+
+  // Scatter panels across the sphere
+  for (let i = 0; i < (ECO ? 10 : 30); i++) {
+    const lat = (Math.random() - 0.5) * Math.PI * 0.8;
+    const lon = Math.random() * Math.PI * 2;
+    const size = 0.15 + Math.random() * 0.25;
+    const panel = createSpherePanel(
+      lat,
+      lon,
+      size,
+      size,
+      R1 + 0.01,
+      3 + Math.floor(Math.random() * 3),
+    );
+    panelGroup.add(panel);
+  }
+  orbGroup.add(panelGroup);
+
+  // ═══════════════════════════════════════════════
+  // LAYER 3: SECONDARY SHELL — offset, partial arcs
+  // ═══════════════════════════════════════════════
+  const shell2 = new THREE.Group();
+  const R2 = 2.12;
+
+  // Partial arcs at random latitudes
+  for (let i = 0; i < (ECO ? 6 : 16); i++) {
+    const lat = (Math.random() - 0.5) * Math.PI * 0.85;
+    const startLon = Math.random() * Math.PI * 2;
+    const arcLen = 0.3 + Math.random() * 1.2;
+    const pts: THREE.Vector3[] = [];
+    const segs = 60;
+    const r = R2 * Math.cos(lat);
+    const y = R2 * Math.sin(lat);
+    for (let j = 0; j <= segs; j++) {
+      const a = startLon + (j / segs) * arcLen;
+      pts.push(new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)));
+    }
+    shell2.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        lineMat(C_MID, 0.2 + Math.random() * 0.3),
+      ),
+    );
+  }
+
+  // Partial meridian arcs
+  for (let i = 0; i < (ECO ? 5 : 12); i++) {
+    const lon = Math.random() * Math.PI * 2;
+    const startLat = (Math.random() - 0.5) * Math.PI * 0.8;
+    const arcLen = 0.3 + Math.random() * 0.8;
+    const pts: THREE.Vector3[] = [];
+    const segs = 40;
+    for (let j = 0; j <= segs; j++) {
+      const lat = startLat + (j / segs) * arcLen;
+      pts.push(
+        new THREE.Vector3(
+          R2 * Math.cos(lat) * Math.cos(lon),
+          R2 * Math.sin(lat),
+          R2 * Math.cos(lat) * Math.sin(lon),
+        ),
+      );
+    }
+    shell2.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        lineMat(C_DIM, 0.15 + Math.random() * 0.2),
+      ),
+    );
+  }
+  orbGroup.add(shell2);
+
+  // ═══════════════════════════════════════════════
+  // LAYER 4: INNER CORE — spiral geodesic
+  // ═══════════════════════════════════════════════
+  const innerCore = new THREE.Group();
+  const R3 = 0.9;
+
+  // Dense spirals
+  for (let s = 0; s < (ECO ? 4 : 8); s++) {
+    const pts: THREE.Vector3[] = [];
+    const turns = 3 + Math.random() * 2;
+    const segs = 300;
+    const phase = (s / 8) * Math.PI * 2;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const lat = t * Math.PI - Math.PI / 2;
+      const lon = t * turns * Math.PI * 2 + phase;
+      pts.push(
+        new THREE.Vector3(
+          R3 * Math.cos(lat) * Math.cos(lon),
+          R3 * Math.sin(lat),
+          R3 * Math.cos(lat) * Math.sin(lon),
+        ),
+      );
+    }
+    innerCore.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        lineMat(C_BRIGHT, 0.3 + Math.random() * 0.2),
+      ),
+    );
+  }
+
+  // Inner latitude rings
+  for (let i = -6; i <= 6; i++) {
+    const lat = (i / 6) * (Math.PI / 2) * 0.9;
+    innerCore.add(new THREE.Line(latRing(R3, lat, 80), lineMat(C_DIM, 0.2)));
+  }
+
+  // Inner meridians
+  for (let i = 0; i < 12; i++) {
+    const lon = (i / 12) * Math.PI * 2;
+    innerCore.add(new THREE.Line(meridian(R3, lon, 80), lineMat(C_DIM, 0.15)));
+  }
+
+  orbGroup.add(innerCore);
+
+  // ═══════════════════════════════════════════════
+  // LAYER 5: INNERMOST CORE — bright hot center
+  // ═══════════════════════════════════════════════
+  const coreR = 0.25;
+
+  // Glowing center sphere — subtle, see-through
+  const coreSphereMat = new THREE.MeshBasicMaterial({
+    color: C_HOT,
+    transparent: true,
+    opacity: 0.15,
+    blending: THREE.AdditiveBlending,
+  });
+  const coreSphere = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), coreSphereMat);
+  orbGroup.add(coreSphere);
+
+  // Larger faint glow — very subtle
+  const glowSphereMat = new THREE.MeshBasicMaterial({
+    color: C_MID,
+    transparent: true,
+    opacity: 0.04,
+    blending: THREE.AdditiveBlending,
+  });
+  const glowSphere = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), glowSphereMat);
+  orbGroup.add(glowSphere);
+
+  // ═══════════════════════════════════════════════
+  // CODE TEXT — tiny, dense, scattered
+  // ═══════════════════════════════════════════════
+  const codeSnippets = [
+    "sys.init()", "0xFF3A", "malloc()", ">> SCAN", "void*", "ACK",
+    "SYNC OK", "ptr_ref", "exec()", "hash256", "::bind", "core.0",
+    "01101001", "10110100", ">>> RDY", "HEAP 4K", "TCP/SYN",
+    "mutex.lk", "IRQ 0x7", "DMA xfer", "REG EAX", "FAULT 0",
+    "kernel.d", "pipe |>", "chmod +x", "fork()", "SIGTERM",
+    "eth0: UP", "AES-256", "RSA 4096", "TLS 1.3", "HTTP/2",
+    "latency", "200 OK", "PATCH /", "fn main", "use std",
+    "impl Orb", "async {}", "spawn()", "arc::new", ".unwrap",
+  ];
+
+  interface SpriteDrift {
+    phi: number;
+    theta: number;
+    r: number;
+    speed: number;
+  }
+
+  function makeTextSprite(text: string, size = 0.08) {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 32;
+    const ctx = c.getContext("2d")!;
+    ctx.font = "bold 14px Courier New";
+    const alpha = 0.35 + Math.random() * 0.55;
+    const tr = (p.textR[0] + Math.random() * (p.textR[1] - p.textR[0])) | 0;
+    const tg = (p.textG[0] + Math.random() * (p.textG[1] - p.textG[0])) | 0;
+    const tb = (p.textB[0] + Math.random() * (p.textB[1] - p.textB[0])) | 0;
+    ctx.fillStyle = `rgba(${tr}, ${tg}, ${tb}, ${alpha})`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 128, 16);
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    const s = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: tex,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    s.scale.set(size * 5, size * 0.7, 1);
+    return s;
+  }
+
+  function scatterText(count: number, sizeFn: () => number, rFn: () => number, speedScale: [number, number]) {
+    const group = new THREE.Group();
+    for (let i = 0; i < count; i++) {
+      const sp = makeTextSprite(
+        codeSnippets[Math.floor(Math.random() * codeSnippets.length)],
+        sizeFn(),
+      );
+      const phi = Math.acos(2 * Math.random() - 1);
+      const theta = Math.random() * Math.PI * 2;
+      const r = rFn();
+      sp.position.set(
+        r * Math.sin(phi) * Math.cos(theta),
+        r * Math.cos(phi),
+        r * Math.sin(phi) * Math.sin(theta),
+      );
+      sp.userData = {
+        phi,
+        theta,
+        r,
+        speed:
+          (speedScale[0] + Math.random() * speedScale[1]) *
+          (Math.random() > 0.5 ? 1 : -1),
+      } satisfies SpriteDrift;
+      group.add(sp);
+    }
+    return group;
+  }
+
+  // On outer sphere — dense text coverage
+  const textOuter = scatterText(
+    ECO ? 250 : 1200,
+    () => 0.04 + Math.random() * 0.04,
+    () => R1 + 0.03 + Math.random() * 0.08,
+    [0.0002, 0.0008],
+  );
+  orbGroup.add(textOuter);
+
+  // On inner core — more text
+  const textInner = scatterText(
+    ECO ? 45 : 100,
+    () => 0.03 + Math.random() * 0.03,
+    () => R3 + 0.02,
+    [0.0005, 0.001],
+  );
+  orbGroup.add(textInner);
+
+  // Floating ambient text between shells
+  const textAmbient = scatterText(
+    ECO ? 100 : 400,
+    () => 0.03,
+    () => R3 + 0.2 + Math.random() * (R1 - R3 - 0.3),
+    [0.0003, 0.0006],
+  );
+  orbGroup.add(textAmbient);
+
+  // ═══════════════════════════════════════════════
+  // ORBITING DEBRIS / ROCKS
+  // ═══════════════════════════════════════════════
+  // Shared geometries for performance — reuse across 250 satellites
+  const debrisGeos = [
+    new THREE.IcosahedronGeometry(0.012, 0),
+    new THREE.IcosahedronGeometry(0.02, 0),
+    new THREE.IcosahedronGeometry(0.03, 1),
+    new THREE.IcosahedronGeometry(0.008, 0),
+    new THREE.TetrahedronGeometry(0.015, 0),
+    new THREE.OctahedronGeometry(0.018, 0),
+  ];
+  interface DebrisOrbit {
+    orbitR: number;
+    speed: number;
+    tiltX: number;
+    tiltZ: number;
+    phase: number;
+  }
+  const debris: THREE.Mesh[] = [];
+  for (let i = 0; i < (ECO ? 60 : 250); i++) {
+    const geo = debrisGeos[Math.floor(Math.random() * debrisGeos.length)];
+    const mat = new THREE.MeshBasicMaterial({
+      color: Math.random() > 0.7 ? C_BRIGHT : C_MID,
+      transparent: true,
+      opacity: 0.3 + Math.random() * 0.6,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    const orbitR = 1.2 + Math.random() * 4.0;
+    const speed = (0.08 + Math.random() * 0.6) * (Math.random() > 0.5 ? 1 : -1);
+    const tiltX = (Math.random() - 0.5) * Math.PI * 0.9;
+    const tiltZ = (Math.random() - 0.5) * Math.PI * 0.5;
+    const phase = Math.random() * Math.PI * 2;
+    mesh.userData = { orbitR, speed, tiltX, tiltZ, phase } satisfies DebrisOrbit;
+    debris.push(mesh);
+    orbGroup.add(mesh);
+
+    // ~15% get a faint trailing line
+    if (Math.random() > 0.85) {
+      const trailPts: THREE.Vector3[] = [];
+      for (let j = 0; j <= 15; j++) {
+        const a = -(j / 15) * 0.3;
+        trailPts.push(
+          new THREE.Vector3(
+            orbitR * Math.cos(a + phase),
+            orbitR * 0.08 * Math.sin(a * 3),
+            orbitR * Math.sin(a + phase),
+          ),
+        );
+      }
+      const trail = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(trailPts),
+        lineMat(C_FAINT, 0.08),
+      );
+      mesh.add(trail);
+    }
+  }
+
+  // ═══════════════════════════════════════════════
+  // DUST PARTICLES — lots of them
+  // ═══════════════════════════════════════════════
+  const dustCount = ECO ? 450 : 2000;
+  const dustPos = new Float32Array(dustCount * 3);
+
+  for (let i = 0; i < dustCount; i++) {
+    // Concentrate near the sphere, sparse further out
+    const rr = 0.5 + Math.pow(Math.random(), 0.6) * 7;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    dustPos[i * 3] = rr * Math.sin(phi) * Math.cos(theta);
+    dustPos[i * 3 + 1] = rr * Math.cos(phi);
+    dustPos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta);
+  }
+
+  const dustGeo = new THREE.BufferGeometry();
+  dustGeo.setAttribute("position", new THREE.Float32BufferAttribute(dustPos, 3));
+
+  // Soft dot texture
+  const dotC = document.createElement("canvas");
+  dotC.width = dotC.height = 64;
+  const dCtx = dotC.getContext("2d")!;
+  const g = dCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, p.dust[0]);
+  g.addColorStop(0.2, p.dust[1]);
+  g.addColorStop(0.5, p.dust[2]);
+  g.addColorStop(1, p.dust[3]);
+  dCtx.fillStyle = g;
+  dCtx.fillRect(0, 0, 64, 64);
+
+  const dustMat = new THREE.PointsMaterial({
+    map: new THREE.CanvasTexture(dotC),
+    size: 0.04,
+    transparent: true,
+    opacity: 0.5,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+    color: C_BRIGHT,
+  });
+  const dustPoints = new THREE.Points(dustGeo, dustMat);
+  orbGroup.add(dustPoints);
+
+  // ═══════════════════════════════════════════════
+  // LAYER HUD: GLOBO OCO DE PARTÍCULAS (réplica do vídeo de referência)
+  // Point-cloud monocromático branco: casca densa (pico ~0.84R), centro oco e
+  // borda suave — o perfil radial exato do vídeo (medido nos frames: brilho
+  // sobe do centro até ~0.8R e cai a zero na borda). Ondas lentas de morph +
+  // rotação do grupo reproduzem o movimento em 360° do vídeo.
+  // ═══════════════════════════════════════════════
+  // Casca externa: partículas orbitando fora do núcleo — reduzidas para um
+  // visual mais clean (9000 → 6000 normal; eco 2600 → 1800) com pontos um
+  // pouco maiores para a densidade não cair.
+  const HUD_COUNT = ECO ? 600 : 3000;
+  const hudPos = new Float32Array(HUD_COUNT * 3);
+  const hudCol = new Float32Array(HUD_COUNT * 3);
+
+  interface HudParticle {
+    theta: number; // azimute (0..2π)
+    phi: number; // polar (0..π)
+    baseR: number; // raio relativo (0..1)
+    phase: number;
+    bright: number;
+  }
+  const hudParts: HudParticle[] = [];
+  const HUD_GOLDEN = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < HUD_COUNT; i++) {
+    // Cobertura uniforme da esfera (espiral de Fibonacci)
+    const y = 1 - (i / (HUD_COUNT - 1)) * 2; // -1..1
+    const phi = Math.acos(y);
+    const theta = HUD_GOLDEN * i;
+    // Casca FINA e OCA no raio do orbe (R1=2.0), sem partículas no interior.
+    // A linha de visão no centro do disco cruza a casca quase de frente (poucas
+    // partículas → centro escuro), e perto do limbo cruza de raspão (muitas →
+    // anel brilhante). É o limb brightening do vídeo: centro ~preto, anel em
+    // ~0,8 R, borda que some.
+    const t = 1 - Math.pow(Math.random(), 1.35);
+    // Casca bem fina, rente à borda (0.92–1.0 × R1): menos pontos perto do
+    // centro do orbe → visual mais clean, sem o miolo cheio.
+    const baseR = (0.92 + t * 0.08) * R1;
+    hudParts.push({
+      theta,
+      phi,
+      baseR,
+      phase: Math.random() * Math.PI * 2,
+      bright: 0.4 + Math.random() * 0.6,
+    });
+  }
+
+  // Casca em CIANO sólido — a cor é fixa e o sombreamento das ondas/limb dá
+  // a profundidade (sem degradê).
+  const C_CIANO = new THREE.Color(0x56d9ff);
+
+  const hudGeo = new THREE.BufferGeometry();
+  hudGeo.setAttribute("position", new THREE.BufferAttribute(hudPos, 3));
+  hudGeo.setAttribute("color", new THREE.BufferAttribute(hudCol, 3));
+
+  // Dot suave branco (HUD monocromático)
+  const hudDotC = document.createElement("canvas");
+  hudDotC.width = hudDotC.height = 64;
+  const hudCtx = hudDotC.getContext("2d")!;
+  const hg = hudCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  hg.addColorStop(0, "rgba(255,255,255,1)");
+  hg.addColorStop(0.25, "rgba(255,255,255,0.9)");
+  hg.addColorStop(0.6, "rgba(255,255,255,0.3)");
+  hg.addColorStop(1, "rgba(255,255,255,0)");
+  hudCtx.fillStyle = hg;
+  hudCtx.fillRect(0, 0, 64, 64);
+
+  const hudMat = new THREE.PointsMaterial({
+    map: new THREE.CanvasTexture(hudDotC),
+    size: ECO ? 0.11 : 0.065,
+    transparent: true,
+    opacity: 0.55,
+    vertexColors: true,
+    blending: THREE.AdditiveBlending,
+    // depthWrite desligado de propósito: o culling do hemisfério de trás é
+    // feito no CPU (updateHudShell zera a cor das partículas do lado oposto),
+    // então não há empilhamento no centro — o globo fica oco como no vídeo.
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const hudPoints = new THREE.Points(hudGeo, hudMat);
+  const hudShell = new THREE.Group();
+  hudShell.add(hudPoints);
+  orbGroup.add(hudShell);
+
+  /** Morph + rotação do globo de partículas. */
+  function updateHudShell(t: number) {
+    const rot = 1 + 0.05 * Math.sin(t * 0.35); // respiro global lento
+    // Rotação VISÍVEL do globo: gira o azimute dentro das ondas do morph, não o
+    // grupo. As partículas ficam em espaço alinhado com o mundo, então o teste
+    // do hemisfério abaixo continua correto (com rotação no grupo, o culling
+    // usava posição local vs câmera mundial e desenhava o lado de trás).
+    const rotT = t * 0.35 * emotionCur.rotSpeed;
+    // Direção centro→câmera: define o hemisfério visível. Só as partículas do
+    // lado da câmera são desenhadas (as outras ficam pretas/invisíveis) — é
+    // isso que produz o globo OCO do vídeo: centro escuro, brilho no limbo
+    // (limb brightening) e borda que some. Sem esse culling, os dois lados da
+    // casca se somavam no centro e o globo virava uma bola sólida.
+    const camDir = camera.position.clone().normalize();
+    for (let i = 0; i < HUD_COUNT; i++) {
+      const h = hudParts[i];
+      const ph = h.phi;
+      const th = h.theta + rotT; // azimute girado: o padrão gira, a partícula fica
+      // Ondas lentas multi-frequência: dobras que giram e se reorganizam.
+      // No eco, o 5º harmônico (sutil) é cortado para baratear o loop CPU.
+      const f =
+        Math.sin(2 * ph + 1.3 * t + h.phase) * 0.55 +
+        Math.sin(3 * th + 0.7 * t + ph * 2) * 0.3 +
+        (ECO ? 0 : Math.sin(5 * th - 1.9 * t + h.phase * 0.5) * 0.15);
+      const r = h.baseR * (1 + 0.07 * f) * rot;
+      const sinPh = Math.sin(ph);
+      const px = r * sinPh * Math.cos(h.theta);
+      const py = r * Math.cos(ph);
+      const pz = r * sinPh * Math.sin(h.theta);
+      hudPos[i * 3] = px;
+      hudPos[i * 3 + 1] = py;
+      hudPos[i * 3 + 2] = pz;
+      // Hemisfério voltado para a câmera: dot > 0 desenha, dot ≤ 0 some (preto)
+      const facing = px * camDir.x + py * camDir.y + pz * camDir.z;
+      if (facing > 0) {
+        // Cristas (f>0) claras, vales escuros — o relevo do vídeo, porém sem
+        // o brilho estourado: teto mais baixo de luminância por partícula.
+        const b0 = THREE.MathUtils.clamp(
+          h.bright * (0.42 + 0.38 * (0.5 + f * 0.5)),
+          0.08,
+          0.85,
+        );
+        // Fade do centro: partículas perto do eixo de visão (projeção no meio
+        // do disco) ficam apagadas — é o que mantém o centro do globo OCO
+        // como no vídeo (centro ~preto, anel no limbo).
+        const perp = Math.sqrt(px * px + py * py + pz * pz - facing * facing);
+        const fade = THREE.MathUtils.clamp(perp / (0.55 * r), 0, 1);
+        const b = b0 * (0.2 + 0.7 * fade);
+        // Ciano em dobro de intensidade (não pode ficar apagado pelo brilho base)
+        const b2 = Math.min(1, b * 1.7);
+        hudCol[i * 3] = C_CIANO.r * b2;
+        hudCol[i * 3 + 1] = C_CIANO.g * b2;
+        hudCol[i * 3 + 2] = C_CIANO.b * b2;
+      } else {
+        hudCol[i * 3] = 0;
+        hudCol[i * 3 + 1] = 0;
+        hudCol[i * 3 + 2] = 0;
+      }
+    }
+    hudGeo.attributes.position.needsUpdate = true;
+    hudGeo.attributes.color.needsUpdate = true;
+  }
+
+  // ═══════════════════════════════════════════════
+  // NÚCLEO DO HUD: ICOSAEDRO SUBDIVIDIDO + PARTÍCULAS (estilo particles.js)
+  // Dentro do globo oco, no centro: um icosaedro wireframe subdividido (detail
+  // 2 = 320 triângulos) girando devagar, com uma nuvem de partículas à la
+  // particles.js — pontos que flutuam e se conectam por linhas quando próximos.
+  // ═══════════════════════════════════════════════
+  const HUD_CORE_R = 0.8;
+  const hudCore = new THREE.Group();
+
+  // Icosaedro subdividido (wireframe das arestas compartilhadas) — agora com
+  // acento CIANO suave, destacando o núcleo da rede de sinapses brancas.
+  const C_CIANO_ICO = 0x56d9ff;
+  const hudIco = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(HUD_CORE_R, 2)),
+    lineMat(C_CIANO_ICO, 0.3),
+  );
+  hudCore.add(hudIco);
+
+  // Nuvem central (particles.js): pontos que flutuam e se conectam quando
+  // próximos — a animação "sinapse" padrão (movimento + novas ligações).
+  // Ajuste fino de densidade/visibilidade:
+  //  - PJS_COUNT: quantidade de pontos (mais = nuvem mais cheia)
+  //  - PJS_LINK_FACTOR: raio de ligação em fração do raio do núcleo (maior = rede mais densa)
+  //  - PJS_LINK_FALLOFF: queda do brilho com a distância (1 = linear, 2 = quadrática
+  //    — só pares muito próximos brilham, o resto vira fio tênue)
+  // Sinapses do núcleo: 120 → 80 (eco 70 → 45) — rede mais clean, com menos
+  // pontos e menos ligações, mantendo o visual particles.js.
+  const PJS_COUNT = ECO ? 36 : 80;
+  const PJS_BOUND = HUD_CORE_R * 0.9;
+  // 0.4 (antes 0.36): um pouco mais de ligações — a rede fica mais "cérebro" e
+  // os pulsos neurais têm mais caminhos para se encadear.
+  const PJS_LINK_FACTOR = 0.4;
+  const PJS_LINK_FALLOFF = 2;
+  // Raio de ligação (compartilhado entre o desenho das linhas e a busca de
+  // vizinhos dos pulsos neurais).
+  const LINK_R = PJS_LINK_FACTOR * HUD_CORE_R;
+  const LINK2 = LINK_R * LINK_R;
+  const pjsPos = new Float32Array(PJS_COUNT * 3);
+  const pjsVel = new Float32Array(PJS_COUNT * 3);
+  for (let i = 0; i < PJS_COUNT; i++) {
+    const rr = Math.pow(Math.random(), 1 / 3) * PJS_BOUND; // uniforme no volume
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    pjsPos[i * 3] = rr * Math.sin(ph) * Math.cos(th);
+    pjsPos[i * 3 + 1] = rr * Math.cos(ph);
+    pjsPos[i * 3 + 2] = rr * Math.sin(ph) * Math.sin(th);
+    // Velocidade um pouco maior: o drift das sinapses fica visível mesmo em
+    // repouso (antes ~0.0045/frame era sutil demais e parecia parado).
+    pjsVel[i * 3] = (Math.random() - 0.5) * 0.013;
+    pjsVel[i * 3 + 1] = (Math.random() - 0.5) * 0.013;
+    pjsVel[i * 3 + 2] = (Math.random() - 0.5) * 0.013;
+  }
+  const pjsGeo = new THREE.BufferGeometry();
+  pjsGeo.setAttribute("position", new THREE.BufferAttribute(pjsPos, 3));
+  const pjsMat = new THREE.PointsMaterial({
+    map: new THREE.CanvasTexture(hudDotC),
+    size: ECO ? 0.065 : 0.06,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const pjsPoints = new THREE.Points(pjsGeo, pjsMat);
+  hudCore.add(pjsPoints);
+
+  // Linhas de conexão "sinapse" (particles.js): buffer no pior caso, drawRange
+  // dinâmico. Cor por vértice: par mais próximo = linha mais clara (branca no
+  // preto), como o efeito clássico de rede neural.
+  const PJS_MAX_PAIRS = (PJS_COUNT * (PJS_COUNT - 1)) / 2;
+  const pjsLinePos = new Float32Array(PJS_MAX_PAIRS * 6);
+  const pjsLineCol = new Float32Array(PJS_MAX_PAIRS * 6);
+  const pjsLineGeo = new THREE.BufferGeometry();
+  pjsLineGeo.setAttribute("position", new THREE.BufferAttribute(pjsLinePos, 3));
+  pjsLineGeo.setAttribute("color", new THREE.BufferAttribute(pjsLineCol, 3));
+  pjsLineGeo.setDrawRange(0, 0);
+  const pjsLineMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.6,
+    vertexColors: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const pjsLines = new THREE.LineSegments(pjsLineGeo, pjsLineMat);
+  hudCore.add(pjsLines);
+
+  // ═══════════════════════════════════════════════
+  // PULSOS NEURAIS — sinapses "pensando"
+  // Uma luz sai de um nó, viaja pela ligação até o vizinho e, ao chegar,
+  // se encadeia para outro nó conectado (impulso real de neurônio). A taxa
+  // de disparo segue a emoção: repouso respira devagar; pensar/falar acende
+  // a cascata. A linha que carrega o pulso acende de branco puro.
+  // ═══════════════════════════════════════════════
+  const SIG_MAX = ECO ? 6 : 14;
+  // Rastro de cometa: cada pulso é uma cabeça brilhante + pontos atrás que
+  // somem e encolhem — a luz viaja de nó em nó deixando uma cauda de brilho.
+  const SIG_TRAIL = 7;
+  const SIG_TRAIL_GAP = 0.04; // espaçamento (em progresso) entre pontos
+  const SIG_PTS = SIG_MAX * SIG_TRAIL;
+  const sigState: {
+    a: number;
+    prevA: number;
+    b: number;
+    t: number;
+    v: number;
+    dead: boolean;
+  }[] = [];
+  for (let i = 0; i < SIG_MAX; i++) {
+    sigState.push({ a: 0, prevA: 0, b: 0, t: 1, v: 0, dead: true });
+  }
+  const sigPos = new Float32Array(SIG_PTS * 3);
+  const sigSize = new Float32Array(SIG_PTS);
+  const sigAlpha = new Float32Array(SIG_PTS);
+  const sigGeo = new THREE.BufferGeometry();
+  sigGeo.setAttribute("position", new THREE.BufferAttribute(sigPos, 3));
+  sigGeo.setAttribute("aSize", new THREE.BufferAttribute(sigSize, 1));
+  sigGeo.setAttribute("aAlpha", new THREE.BufferAttribute(sigAlpha, 1));
+  // Shader próprio: tamanho E brilho variam por ponto (cabeça grande e
+  // intensa, cauda encolhendo) — PointsMaterial só permite tamanho uniforme.
+  const sigMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: new THREE.CanvasTexture(hudDotC) },
+      uScale: { value: renderer.domElement.height * 0.5 },
+    },
+    vertexShader: `
+      attribute float aSize;
+      attribute float aAlpha;
+      uniform float uScale;
+      varying float vAlpha;
+      void main() {
+        vAlpha = aAlpha;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * (uScale / -mv.z);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uMap;
+      varying float vAlpha;
+      void main() {
+        vec4 tex = texture2D(uMap, gl_PointCoord);
+        // Pulso neural AZUL (o restante da rede continua branco)
+        gl_FragColor = vec4(0.34, 0.85, 1.0, vAlpha) * tex;
+      }
+    `,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const sigPoints = new THREE.Points(sigGeo, sigMat);
+  hudCore.add(sigPoints);
+
+  // Acumulador de disparo (pulsos por frame, segue a atividade neural) e o
+  // conjunto de ligações ativas (para acender a linha sob o pulso).
+  let sigAcc = 0;
+  const sigKeys = new Set<number>();
+
+  /** Acha um nó conectado a `from` (mesma regra LINK_R do desenho das linhas). */
+  function sigNeighbor(from: number): number {
+    for (let k = 0; k < 14; k++) {
+      const j = Math.floor(Math.random() * PJS_COUNT);
+      if (j === from) continue;
+      const dx = pjsPos[from * 3] - pjsPos[j * 3];
+      const dy = pjsPos[from * 3 + 1] - pjsPos[j * 3 + 1];
+      const dz = pjsPos[from * 3 + 2] - pjsPos[j * 3 + 2];
+      if (dx * dx + dy * dy + dz * dz < LINK2) return j;
+    }
+    return -1;
+  }
+
+  orbGroup.add(hudCore);
+
+  /** Núcleo particles.js: drift + conexões + rotação do icosaedro (só HUD). */
+  function updateHudCore(t: number) {
+    // Rotação lenta de toda a rede: as sinapses se reorganizam em 360°.
+    // Um pouco mais ágil que antes para o movimento ficar perceptível.
+    hudCore.rotation.y += 0.0011 * emotionCur.rotSpeed;
+    hudIco.rotation.x += 0.006 * emotionCur.rotSpeed;
+    hudIco.rotation.y += 0.009 * emotionCur.rotSpeed;
+    // Drift das partículas com bounce suave na borda da esfera interna.
+    // Agitação mínima sempre ligada (as sinapses nunca ficam paradas) e, em
+    // alerta (batimento alto), o movimento acompanha a intensidade do BPM.
+    const agitate = 1.3 + emotionCur.red * 2.4;
+    for (let i = 0; i < PJS_COUNT; i++) {
+      const x = pjsPos[i * 3] + pjsVel[i * 3] * agitate;
+      const y = pjsPos[i * 3 + 1] + pjsVel[i * 3 + 1] * agitate;
+      const z = pjsPos[i * 3 + 2] + pjsVel[i * 3 + 2] * agitate;
+      const rr = Math.sqrt(x * x + y * y + z * z);
+      if (rr > PJS_BOUND) {
+        const s = PJS_BOUND / rr;
+        pjsVel[i * 3] *= -0.6;
+        pjsVel[i * 3 + 1] *= -0.6;
+        pjsVel[i * 3 + 2] *= -0.6;
+        pjsPos[i * 3] = x * s + pjsVel[i * 3] * 2;
+        pjsPos[i * 3 + 1] = y * s + pjsVel[i * 3 + 1] * 2;
+        pjsPos[i * 3 + 2] = z * s + pjsVel[i * 3 + 2] * 2;
+      } else {
+        pjsPos[i * 3] = x;
+        pjsPos[i * 3 + 1] = y;
+        pjsPos[i * 3 + 2] = z;
+      }
+    }
+    pjsGeo.attributes.position.needsUpdate = true;
+    // Ligações que carregam um pulso neural neste frame (a linha acende).
+    sigKeys.clear();
+    for (let k = 0; k < SIG_MAX; k++) {
+      const s = sigState[k];
+      if (s.dead) continue;
+      const a = Math.min(s.a, s.b);
+      const b = Math.max(s.a, s.b);
+      sigKeys.add(a * PJS_COUNT + b);
+    }
+    // Conexões: pares dentro do raio viram segmentos (particles.js) — linhas
+    // mais claras quanto mais próximos os pontos (sinapse forte x fraca).
+    let vi = 0;
+    const VMAX = PJS_MAX_PAIRS * 6;
+    for (let i = 0; i < PJS_COUNT && vi < VMAX; i++) {
+      const xi = pjsPos[i * 3], yi = pjsPos[i * 3 + 1], zi = pjsPos[i * 3 + 2];
+      for (let j = i + 1; j < PJS_COUNT && vi < VMAX; j++) {
+        const dx = xi - pjsPos[j * 3];
+        const dy = yi - pjsPos[j * 3 + 1];
+        const dz = zi - pjsPos[j * 3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < LINK2) {
+          const dist = Math.sqrt(d2) / LINK_R;
+          // Brilho: proximidade + “respiração” suave no tempo (a rede nunca fica
+          // estática) + alerta deixa as sinapses mais claras (rede “acesa”).
+          // Uma ligação com pulso neural cruzando acende em branco puro.
+          const ativa = sigKeys.has(i * PJS_COUNT + j);
+          const b = ativa
+            ? 1
+            : THREE.MathUtils.clamp(
+                1 - Math.pow(dist, PJS_LINK_FALLOFF) +
+                  Math.sin(t * 1.6) * 0.05 +
+                  emotionCur.red * 0.3,
+                0.05,
+                1,
+              );
+          pjsLinePos[vi] = xi;
+          pjsLinePos[vi + 1] = yi;
+          pjsLinePos[vi + 2] = zi;
+          pjsLinePos[vi + 3] = pjsPos[j * 3];
+          pjsLinePos[vi + 4] = pjsPos[j * 3 + 1];
+          pjsLinePos[vi + 5] = pjsPos[j * 3 + 2];
+          pjsLineCol[vi] = b;
+          pjsLineCol[vi + 1] = b;
+          pjsLineCol[vi + 2] = b;
+          pjsLineCol[vi + 3] = b;
+          pjsLineCol[vi + 4] = b;
+          pjsLineCol[vi + 5] = b;
+          vi += 6;
+        }
+      }
+    }
+    pjsLineGeo.setDrawRange(0, vi / 3);
+    pjsLineGeo.attributes.position.needsUpdate = true;
+    pjsLineGeo.attributes.color.needsUpdate = true;
+    // Pulso suave do núcleo acompanha a emoção + batida do coração em alerta
+    const pulse =
+      1 +
+      Math.sin(t * 1.4 * emotionCur.coreSpeed) * 0.045 +
+      emotionCur.surge * 0.1 +
+      heartbeat * 0.14 * emotionCur.red;
+    hudCore.scale.setScalar(pulse);
+    // Partículas e linhas reagem ao batimento: brilham e crescem a cada batida
+    pjsMat.opacity = 0.9 + heartbeat * 0.15 * emotionCur.red;
+    pjsMat.size = (ECO ? 0.065 : 0.06) * (1 + heartbeat * 0.3 * emotionCur.red);
+
+    // ——— Pulsos neurais: disparo, avanço, encadeamento e rastro de cometa ———
+    sigAcc += neuralEff * 0.055;
+    const sigSpawn = emotionCur.neural > 0.02 ? Math.floor(sigAcc) : 0;
+    sigAcc -= sigSpawn;
+    for (let s = 0; s < sigSpawn; s++) {
+      let slot = -1;
+      for (let k = 0; k < SIG_MAX; k++) {
+        if (sigState[k].dead) {
+          slot = k;
+          break;
+        }
+      }
+      if (slot < 0) break;
+      const a = Math.floor(Math.random() * PJS_COUNT);
+      const b = sigNeighbor(a);
+      if (b < 0) continue;
+      sigState[slot] = {
+        a,
+        prevA: a,
+        b,
+        t: 0,
+        v: 0.012 + Math.random() * 0.014,
+        dead: false,
+      };
+    }
+    const SIG_HEAD = ECO ? 0.16 : 0.19; // tamanho da cabeça do pulso (maior)
+    for (let k = 0; k < SIG_MAX; k++) {
+      const s = sigState[k];
+      if (!s.dead) {
+        s.t += s.v;
+        if (s.t >= 1) {
+          // Chegou: se encadeia para outro vizinho do destino (impulso real)
+          const nb = sigNeighbor(s.b);
+          if (nb >= 0 && nb !== s.a) {
+            s.prevA = s.a;
+            s.a = s.b;
+            s.b = nb;
+            s.t = 0;
+          } else {
+            s.dead = true;
+          }
+        }
+      }
+      if (s.dead) {
+        for (let p = 0; p < SIG_TRAIL; p++) {
+          const idx = (k * SIG_TRAIL + p) * 3;
+          sigPos[idx] = 0;
+          sigPos[idx + 1] = 0;
+          sigPos[idx + 2] = 0;
+          sigSize[k * SIG_TRAIL + p] = 0;
+          sigAlpha[k * SIG_TRAIL + p] = 0;
+        }
+        continue;
+      }
+      // Intensidade da cabeça: incha no meio do segmento e nunca apaga nas
+      // pontas (0.45..1) — o pulso continua visível ao entrar/sair do nó.
+      const I =
+        0.45 + 0.55 * Math.pow(Math.max(0, Math.sin(s.t * Math.PI)), 1.2);
+      for (let p = 0; p < SIG_TRAIL; p++) {
+        const u = s.t - p * SIG_TRAIL_GAP; // progresso do ponto (pode ser <0)
+        const idx = (k * SIG_TRAIL + p) * 3;
+        // Na frente (u>=0) o ponto vai de a→b; atrás (u<0) volta por prevA→a —
+        // a cauda dobra a esquina no nó, como um impulso real de neurônio.
+        const ix = (u >= 0 ? s.a : s.prevA) * 3;
+        const jx = (u >= 0 ? s.b : s.a) * 3;
+        const w = u >= 0 ? u : Math.max(0, Math.min(1, u + 1));
+        sigPos[idx] = pjsPos[ix] + (pjsPos[jx] - pjsPos[ix]) * w;
+        sigPos[idx + 1] = pjsPos[ix + 1] + (pjsPos[jx + 1] - pjsPos[ix + 1]) * w;
+        sigPos[idx + 2] = pjsPos[ix + 2] + (pjsPos[jx + 2] - pjsPos[ix + 2]) * w;
+        // Cauda: brilho e tamanho caem com a distância da cabeça (cometa)
+        const fade = Math.pow(1 - p / (SIG_TRAIL - 1), 1.2);
+        sigAlpha[k * SIG_TRAIL + p] = I * fade;
+        sigSize[k * SIG_TRAIL + p] = SIG_HEAD * fade * (0.65 + 0.35 * I);
+      }
+    }
+    sigGeo.attributes.position.needsUpdate = true;
+    sigGeo.attributes.aSize.needsUpdate = true;
+    sigGeo.attributes.aAlpha.needsUpdate = true;
+  }
+
+  // ═══════════════════════════════════════════════
+  // SCANNING RINGS
+  // ═══════════════════════════════════════════════
+  function makeScanRing(radius: number, thickness = 0.015) {
+    const geo = new THREE.RingGeometry(radius - thickness, radius + thickness, 120);
+    const mat = new THREE.MeshBasicMaterial({
+      color: C_BRIGHT,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = Math.PI / 2;
+    return mesh;
+  }
+
+  const scanRing1 = makeScanRing(R1, 0.01);
+  const scanRing2 = makeScanRing(R1 * 0.7, 0.008);
+  orbGroup.add(scanRing1, scanRing2);
+
+  // ═══════════════════════════════════════════════
+  // HEXAGONAL NODES — small tech details
+  // ═══════════════════════════════════════════════
+  for (let i = 0; i < (ECO ? 6 : 15); i++) {
+    const phi = Math.acos(2 * Math.random() - 1);
+    const theta = Math.random() * Math.PI * 2;
+    const r = R1 + 0.02;
+    const hexGeo = new THREE.CircleGeometry(0.03 + Math.random() * 0.02, 6);
+    const hexEdges = new THREE.EdgesGeometry(hexGeo);
+    const hex = new THREE.LineSegments(hexEdges, lineMat(C_MID, 0.5));
+    hex.position.set(
+      r * Math.sin(phi) * Math.cos(theta),
+      r * Math.cos(phi),
+      r * Math.sin(phi) * Math.sin(theta),
+    );
+    hex.lookAt(0, 0, 0);
+    outerShell.add(hex);
+  }
+
+  // Só o globo de partículas fica visível — réplica fiel do vídeo (fundo
+  // preto + point-cloud branco). Todo o resto (gaiola, painéis, texto, debris,
+  // poeira, anéis de varredura) sai de cena.
+  outerShell.visible = false;
+  panelGroup.visible = false;
+  shell2.visible = false;
+  innerCore.visible = false;
+  coreSphere.visible = false;
+  glowSphere.visible = false;
+  textOuter.visible = false;
+  textInner.visible = false;
+  textAmbient.visible = false;
+  for (const d of debris) d.visible = false;
+  dustPoints.visible = false;
+  scanRing1.visible = false;
+  scanRing2.visible = false;
+
+  // ═══════════════════════════════════════════════
+  // GESTURE / PROGRAMMATIC CAMERA CONTROL
+  // ═══════════════════════════════════════════════
+  const sphericalScratch = new THREE.Spherical();
+  const offsetScratch = new THREE.Vector3();
+
+  function rotateBy(deltaTheta: number, deltaPhi: number) {
+    offsetScratch.copy(camera.position).sub(controls.target);
+    sphericalScratch.setFromVector3(offsetScratch);
+    sphericalScratch.theta -= deltaTheta;
+    sphericalScratch.phi = THREE.MathUtils.clamp(
+      sphericalScratch.phi - deltaPhi,
+      0.05,
+      Math.PI - 0.05,
+    );
+    sphericalScratch.makeSafe();
+    offsetScratch.setFromSpherical(sphericalScratch);
+    camera.position.copy(controls.target).add(offsetScratch);
+    camera.lookAt(controls.target);
+  }
+
+  function zoomBy(factor: number) {
+    offsetScratch.copy(camera.position).sub(controls.target);
+    const dist = THREE.MathUtils.clamp(
+      offsetScratch.length() * factor,
+      MIN_DISTANCE,
+      MAX_DISTANCE,
+    );
+    offsetScratch.setLength(dist);
+    camera.position.copy(controls.target).add(offsetScratch);
+  }
+
+  function resetView() {
+    camera.position.copy(HOME_POSITION);
+    controls.target.set(0, 0, 0);
+    camera.lookAt(controls.target);
+    controls.update();
+  }
+
+  // ═══════════════════════════════════════════════
+  // EMOÇÕES — alvos que o loop anima com suavização (lerp)
+  // ═══════════════════════════════════════════════
+  interface EmotionState {
+    bloom: number;
+    coreSpeed: number;
+    rotSpeed: number;
+    surge: number;
+    red: number;
+    scan: number;
+    /** Atividade neural das sinapses: taxa de pulsos viajando na rede
+     *  (0 = repouso, ~1 = pensando, >1 = falando — a cascata acelera). */
+    neural: number;
+  }
+  const EMOTION_STATES: Record<OrbEmotion, EmotionState> = {
+    // neural: repouso respira devagar (0.12); ouvir/confirmar/contente aceleram;
+    // pensar (1.0) e falar (1.35) disparam a cascata de pulsos nas sinapses.
+    idle: { bloom: 1.8, coreSpeed: 1.0, rotSpeed: 1.0, surge: 0.0, red: 0.0, scan: 1.0, neural: 0.25 },
+    listening: { bloom: 2.2, coreSpeed: 1.7, rotSpeed: 1.3, surge: 0.3, red: 0.0, scan: 1.7, neural: 0.7 },
+    thinking: { bloom: 2.1, coreSpeed: 2.4, rotSpeed: 1.9, surge: 0.5, red: 0.0, scan: 1.3, neural: 1.0 },
+    speaking: { bloom: 2.7, coreSpeed: 1.4, rotSpeed: 1.1, surge: 0.9, red: 0.0, scan: 2.2, neural: 1.35 },
+    confirming: { bloom: 2.4, coreSpeed: 3.0, rotSpeed: 0.7, surge: 0.9, red: 0.35, scan: 2.5, neural: 0.9 },
+    error: { bloom: 1.3, coreSpeed: 0.5, rotSpeed: 0.45, surge: 0.15, red: 0.55, scan: 0.6, neural: 0.3 },
+    happy: { bloom: 2.9, coreSpeed: 2.6, rotSpeed: 1.7, surge: 1.3, red: 0.0, scan: 2.8, neural: 0.8 },
+    // Batimentos altos (rPPG): o orbe acende em vermelho com pulsação de coração
+    alerta: { bloom: 2.4, coreSpeed: 1.6, rotSpeed: 1.2, surge: 0.8, red: 1.0, scan: 1.6, neural: 0.45 },
+  };
+  let emotionCur: EmotionState = { ...EMOTION_STATES.idle };
+  let emotionTarget: EmotionState = { ...EMOTION_STATES.idle };
+  /** Último BPM medido pelo rPPG (null = câmera desligada / sem leitura). */
+  let bpmAtual: number | null = null;
+  /** Pulso do batimento cardíaco (0..1) calculado a cada frame no animate(). */
+  let heartbeat = 0;
+  // Fala em andamento (TTS): timeline de frases com duração estimada pela
+  // quantidade de texto — a base do envelope neural “frase por frase”.
+  let speechTimeline: { frases: { start: number; dur: number }[] } | null = null;
+  let speechStartT = 0;
+  /** Atividade neural efetiva deste frame (emoção base + envelope de fala). */
+  let neuralEff = 0;
+
+  function setEmotion(emotion: OrbEmotion) {
+    emotionTarget = { ...(EMOTION_STATES[emotion] ?? EMOTION_STATES.idle) };
+  }
+
+  function setBpm(bpm: number | null) {
+    bpmAtual = bpm;
+  }
+
+  function setSpeech(text: string | null) {
+    if (!text) {
+      speechTimeline = null;
+      return;
+    }
+    speechStartT = clock.getElapsedTime();
+    // Divide a resposta em frases (., !, ?, …) e estima a duração de cada uma
+    // pelo tamanho do texto — mesmo método do flash de fala do HUD (~80ms/car).
+    const partes = text.match(/[^.!?…]+[.!?…]*/g) ?? [text];
+    const frases: { start: number; dur: number }[] = [];
+    let acc = 0;
+    for (const p of partes) {
+      const dur = Math.min(8, Math.max(0.6, p.length * 0.085 + 0.25));
+      frases.push({ start: acc, dur });
+      acc += dur;
+    }
+    speechTimeline = { frases };
+  }
+
+  // ═══════════════════════════════════════════════
+  // ANIMATION
+  // ═══════════════════════════════════════════════
+  const clock = new THREE.Clock();
+  let flickerTimer = 0;
+  let rafId = 0;
+  let disposed = false;
+
+  function animate() {
+    if (disposed) return;
+    rafId = requestAnimationFrame(animate);
+    const t = clock.getElapsedTime();
+
+    // Suaviza a transição entre emoções (0.06 = visível, sem ficar brusco)
+    const lerp = (a: number, b: number) => a + (b - a) * 0.06;
+    emotionCur.bloom = lerp(emotionCur.bloom, emotionTarget.bloom);
+    emotionCur.coreSpeed = lerp(emotionCur.coreSpeed, emotionTarget.coreSpeed);
+    emotionCur.rotSpeed = lerp(emotionCur.rotSpeed, emotionTarget.rotSpeed);
+    emotionCur.surge = lerp(emotionCur.surge, emotionTarget.surge);
+    emotionCur.red = lerp(emotionCur.red, emotionTarget.red);
+    emotionCur.scan = lerp(emotionCur.scan, emotionTarget.scan);
+    emotionCur.neural = lerp(emotionCur.neural, emotionTarget.neural);
+
+    // Envelope de fala: rajada de pulsos no início de cada frase, caindo até a
+    // próxima — o orbe “pensa” a resposta frase por frase (fala real via TTS).
+    neuralEff = emotionCur.neural;
+    if (speechTimeline && speechTimeline.frases.length > 0) {
+      const el = t - speechStartT;
+      let cur: { start: number; dur: number } | null = null;
+      for (const f of speechTimeline.frases) {
+        if (el >= f.start && el < f.start + f.dur) {
+          cur = f;
+          break;
+        }
+      }
+      if (cur) {
+        const p = Math.min(1, (el - cur.start) / cur.dur);
+        // Início da frase: 2.55 (rajada). Decai para ~0.85 antes da próxima.
+        neuralEff = 0.85 + 1.7 * Math.exp(-3.2 * p);
+      }
+    }
+
+    // Batimento cardíaco (rPPG): pulso duplo “lub-dub” na frequência do BPM.
+    // Só age quando o orbe está em alerta (red > 0) — calmo fica sem pulsação.
+    heartbeat = 0;
+    if (emotionCur.red > 0.01 && bpmAtual !== null && bpmAtual > 30) {
+      const bps = bpmAtual / 60;
+      const ph = (t * bps) % 1; // fase 0..1 de cada batimento
+      const s1 = ph < 0.22 ? Math.sin((ph / 0.22) * Math.PI) : 0; // sistole
+      const s2 =
+        ph >= 0.22 && ph < 0.36
+          ? Math.sin(((ph - 0.22) / 0.14) * Math.PI)
+          : 0; // diástole
+      heartbeat = Math.max(s1 * 0.7, s2);
+    }
+    // Tint vermelho pisca com o batimento (nunca apaga de vez: 55% no vale)
+    chromaticPass.uniforms.uRedTint.value =
+      emotionCur.red * (0.55 + 0.45 * heartbeat);
+    // Brilho (bloom): acompanha a emoção, pulsa suave e estoura a cada batida
+    // quando o orbe está em alerta.
+    bloom.strength =
+      0.12 +
+      emotionCur.bloom * 0.07 +
+      Math.sin(t * 0.8) * 0.04 +
+      heartbeat * 0.22 * emotionCur.red;
+
+    // Outer shell rotation
+    outerShell.rotation.y += 0.0015 * emotionCur.rotSpeed;
+    outerShell.rotation.x = Math.sin(t * 0.08) * 0.05;
+
+    // Panel group follows shell but with slight offset
+    panelGroup.rotation.y += 0.0018 * emotionCur.rotSpeed;
+    panelGroup.rotation.x = Math.sin(t * 0.08 + 0.5) * 0.04;
+
+    // Secondary shell counter-rotates slowly
+    shell2.rotation.y -= 0.001 * emotionCur.rotSpeed;
+    shell2.rotation.z = Math.sin(t * 0.12) * 0.03;
+
+    // Inner core — opposite, faster
+    innerCore.rotation.y -= 0.005 * emotionCur.rotSpeed;
+    innerCore.rotation.z += 0.002 * emotionCur.rotSpeed;
+    innerCore.rotation.x = Math.cos(t * 0.1) * 0.08;
+
+    // Core pulse: surtos e escala acompanham a emoção.
+    const wave1 = Math.sin(t * 1.2 * emotionCur.coreSpeed);
+    const wave3 = Math.pow(Math.max(0, Math.sin(t * 0.4 * emotionCur.coreSpeed)), 5); // rare big surge
+    const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 * emotionCur.coreSpeed + 2)), 8); // mega surge
+    const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3); // periodic full transparency
+    const surge = wave3 * 1.5 + wave4 * 2.0 + emotionCur.surge * 0.6;
+    const surgeCenter = surge;
+    const coreScale = 1 + surgeCenter + Math.sin(t * 5) * 0.05;
+    coreSphere.scale.setScalar(coreScale);
+    const coreOpacity = Math.max(
+      0,
+      (0.08 + wave1 * 0.05 + surgeCenter * 0.2) * (1 - fadeOut * 0.95),
+    );
+    coreSphereMat.opacity = Math.min(0.6, coreOpacity);
+    glowSphere.scale.setScalar(1 + surgeCenter * 0.8);
+    glowSphereMat.opacity = Math.max(
+      0,
+      (0.03 + surgeCenter * 0.08) * (1 - fadeOut * 0.9),
+    );
+
+    // Debris orbits
+    debris.forEach((d) => {
+      const u = d.userData as DebrisOrbit;
+      const a = t * u.speed + u.phase;
+      d.position.set(
+        u.orbitR * Math.cos(a) * Math.cos(u.tiltX),
+        u.orbitR * Math.sin(u.tiltX) * Math.sin(a * 0.8) + Math.sin(a * 0.3 + u.tiltZ) * 0.2,
+        u.orbitR * Math.sin(a) * Math.cos(u.tiltZ),
+      );
+      d.rotation.x += 0.015;
+      d.rotation.z += 0.01;
+    });
+
+    // Text drift
+    const driftGroups: [THREE.Group, number][] = [
+      [textOuter, 1],
+      [textInner, 2],
+      [textAmbient, 1.2],
+    ];
+    for (const [group, mult] of driftGroups) {
+      group.children.forEach((sp) => {
+        const u = sp.userData as SpriteDrift;
+        u.theta += u.speed * mult;
+        sp.position.set(
+          u.r * Math.sin(u.phi) * Math.cos(u.theta),
+          u.r * Math.cos(u.phi),
+          u.r * Math.sin(u.phi) * Math.sin(u.theta),
+        );
+      });
+    }
+
+    // Scan rings sweeping (velocidade/opacidade seguem a emoção)
+    const scanY1 = Math.sin(t * 0.4 * emotionCur.scan) * R1;
+    scanRing1.position.y = scanY1;
+    const scanS1 = Math.sqrt(Math.max(0, R1 * R1 - scanY1 * scanY1)) / R1;
+    scanRing1.scale.set(scanS1, scanS1, 1);
+    (scanRing1.material as THREE.MeshBasicMaterial).opacity = Math.min(0.5, 0.2 * scanS1 * emotionCur.scan);
+
+    const scanY2 = Math.sin(t * 0.6 * emotionCur.scan + 2) * R3;
+    scanRing2.position.y = scanY2;
+    const scanS2 = Math.sqrt(Math.max(0, R3 * R3 - scanY2 * scanY2)) / R3;
+    scanRing2.scale.set(scanS2, scanS2, 1);
+    (scanRing2.material as THREE.MeshBasicMaterial).opacity = Math.min(0.4, 0.15 * scanS2 * emotionCur.scan);
+
+    // Dust rotation
+    dustPoints.rotation.y += 0.0002;
+
+    // Globo de partículas: morph das dobras + rotação 360°
+    updateHudShell(t);
+    // Núcleo: icosaedro + nuvem particles.js no centro (sinapses)
+    updateHudCore(t);
+
+    // Random flicker on some panels
+    flickerTimer += 0.016;
+    if (flickerTimer > 0.1) {
+      flickerTimer = 0;
+      panelGroup.children.forEach((p) => {
+        if (Math.random() > 0.95) {
+          p.visible = !p.visible;
+        }
+      });
+    }
+
+    // Bloom foi removido 100% (strength 0): o orbe e o símbolo usam só iluminação.
+
+    // Update chromatic aberration time
+    chromaticPass.uniforms.uTime.value = t;
+
+    // Não renderiza com canvas em tamanho zero (janela minimizada/aba oculta
+    // antes do layout): evita os avisos WebGL "attachment has zero size" e o
+    // desperdício de GPU/CPU em hardware fraco. O rAF segue vivo (o estado da
+    // cena continua animando); só o desenho pula.
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (cw > 0 && ch > 0) {
+      controls.update();
+      composer.render();
+    } else {
+      controls.update();
+    }
+  }
+
+  animate();
+
+  // ——— RESIZE ———
+  function onResize() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
+    // Mantém a escala de atenuação dos pulsos neurais (cometa) no tamanho certo
+    (sigMat.uniforms.uScale as { value: number }).value =
+      renderer.domElement.height * 0.5;
+  }
+  window.addEventListener("resize", onResize);
+
+  // ——— CLEANUP ———
+  function dispose() {
+    disposed = true;
+    cancelAnimationFrame(rafId);
+    window.removeEventListener("resize", onResize);
+    controls.dispose();
+    scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        if (!mat) continue;
+        const anyMat = mat as THREE.Material & { map?: THREE.Texture };
+        anyMat.map?.dispose();
+        mat.dispose();
+      }
+    });
+    composer.dispose();
+    renderer.dispose();
+    renderer.domElement.remove();
+  }
+
+  return {
+    rotateBy,
+    zoomBy,
+    zoomIn: () => zoomBy(0.65),
+    zoomOut: () => zoomBy(1.55),
+    resetView,
+    setEmotion,
+    setBpm,
+    setSpeech,
+    dispose,
+  };
+}
