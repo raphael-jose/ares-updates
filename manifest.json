@@ -1,11 +1,11 @@
 {
-  "versao": "20260810-111809",
+  "versao": "20260810-113848",
   "npm": false,
   "exigeReinicio": true,
   "notas": [
-    "�rea do dev: clique em um feedback para abrir o texto COMPLETO em um modal (a lista mostra um resumo de 4 linhas)",
-    "Novo bot�o de APAGAR em cada feedback individual (antes s� dava para limpar tudo)",
-    "DELETE /api/feedback?id=<id> remove um �nico feedback"
+    "�rea do dev: categorize cada feedback como BUG / SUGEST�O / ELOGIO / OUTRO (borda colorida + filtro com contagens no painel)",
+    "Arthemis avisa por voz quando um feedback novo chega (mesmo com a janela de erros fechada)",
+    "Novo: badge de mensagens n�o lidas no bot�o CHAT + som de notifica��o quando uma mensagem chega com o chat fechado"
   ],
   "arquivos": [
     {
@@ -35,8 +35,8 @@
     },
     {
       "caminho": "app/api/feedback/route.ts",
-      "url": "arquivos/5a66d67124d4e78646982a6293cf14b059bc7b86452e9e877e7ecc6731868bad",
-      "sha256": "5a66d67124d4e78646982a6293cf14b059bc7b86452e9e877e7ecc6731868bad"
+      "url": "arquivos/43d98712a3662af94a61ebea6e1ac07e8436dac7a69ea304cf8f8d5c25aafae5",
+      "sha256": "43d98712a3662af94a61ebea6e1ac07e8436dac7a69ea304cf8f8d5c25aafae5"
     },
     {
       "caminho": "app/api/finance/route.ts",
@@ -95,8 +95,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/c3a459eafa02b611dcf27be559e3e6aefa8120d071143589f1cfea0954469787",
-      "sha256": "c3a459eafa02b611dcf27be559e3e6aefa8120d071143589f1cfea0954469787"
+      "url": "arquivos/a7a6f017638c82c85b2e9cfd080605b9c0695ff79e183458dd83cc0a4fb752b2",
+      "sha256": "a7a6f017638c82c85b2e9cfd080605b9c0695ff79e183458dd83cc0a4fb752b2"
     },
     {
       "caminho": "app/icon.svg",
@@ -125,8 +125,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/7d601ba90513ea0edde0227fc699644ef70f72e13c26ccefaa00ceea0397d9ee",
-      "sha256": "7d601ba90513ea0edde0227fc699644ef70f72e13c26ccefaa00ceea0397d9ee"
+      "url": "arquivos/0b1f2b422094f7d1d149e4340d32cb03543a7294297b91dbab2475a9d2c6d4f9",
+      "sha256": "0b1f2b422094f7d1d149e4340d32cb03543a7294297b91dbab2475a9d2c6d4f9"
     },
     {
       "caminho": "instrumentation.ts",
@@ -165,8 +165,8 @@
     },
     {
       "caminho": "lib/agent/feedback.ts",
-      "url": "arquivos/aadf3a05fe4707cc92dfafe3159845922affbd591f08e87da3b19ed59fddedf9",
-      "sha256": "aadf3a05fe4707cc92dfafe3159845922affbd591f08e87da3b19ed59fddedf9"
+      "url": "arquivos/f97b474c8409c7614f723a07605a7796f2220bc7f7d2e53ce9a7e7f1bbead2c7",
+      "sha256": "f97b474c8409c7614f723a07605a7796f2220bc7f7d2e53ce9a7e7f1bbead2c7"
     },
     {
       "caminho": "lib/agent/finance.ts",
