@@ -1,12 +1,12 @@
 {
-  "versao": "20260810-225320",
+  "versao": "20260810-232649",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Correção crítica da CHAMADA DE ÁUDIO: o áudio agora conecta de verdade entre as duas máquinas — antes a chamada abria mas a mídia nunca ligava (um falava e o outro não ouvia). Quem não tem câmera (ou nega o acesso) entra na chamada de vídeo só com áudio, sem perder a ligação.",
-    "Correção da CÂMERA na chamada de vídeo: o vídeo local agora aparece no canto da janela assim que a chamada conecta (antes ficava preto/invisível).",
-    "Novo visual da janela de chamada (avatar com pulso de energia, animação de entrada) e da área CONEXÃO P2P do chat (linha de energia, gradiente, glow).",
-    "O indicador P2P sumiu do HUD — a conexão vive só dentro do chat. A Arthemis não fala mais quando alguém fica online; há um botão de sino por contato para ativar aviso (badge + som, sem voz)."
+    "Chat renovado: a área de CONEXÃO P2P no topo da conversa foi removida — o chat ficou limpo, e o status da conexão aparece de forma discreta na lista de contatos.",
+    "FOTO DE PERFIL: clique na foto de um contato para ver o card de status (foto grande, ONLINE/AUSENTE/OFFLINE) e trocar a foto de perfil (a foto fica salva na sua máquina).",
+    "STATUS AUSENTE: quando o contato está conectado mas longe do app por mais de 3 minutos, o status mostra AUSENTE em vez de ONLINE — mais honesto que 'online' enganoso.",
+    "REAÇÕES: cada mensagem agora tem reação com emoji — clique no botão de emoji ou dê DOIS cliques na mensagem para curtir com ❤️. A reação aparece embaixo da bolha e chega para o outro lado em tempo real."
   ],
   "arquivos": [
     {
@@ -111,8 +111,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/663ec71da863eb20e3c48a10d06b0a561b6dabfe8136bdb201a04c613690946d",
-      "sha256": "663ec71da863eb20e3c48a10d06b0a561b6dabfe8136bdb201a04c613690946d"
+      "url": "arquivos/e3db23d6e949c0bbb2253f1d2a7d722c717e9904afb1e65c5d3528c21e9452cb",
+      "sha256": "e3db23d6e949c0bbb2253f1d2a7d722c717e9904afb1e65c5d3528c21e9452cb"
     },
     {
       "caminho": "app/icon.svg",
@@ -141,8 +141,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/bd7e5e4de13e96d25b426bf7994773c3bf6d0290c1947c25d1ac18138f17ed74",
-      "sha256": "bd7e5e4de13e96d25b426bf7994773c3bf6d0290c1947c25d1ac18138f17ed74"
+      "url": "arquivos/fb320f981d1fb435b6dc840d8038e624e936935a1fd6da3a9e1801bf6cf5510d",
+      "sha256": "fb320f981d1fb435b6dc840d8038e624e936935a1fd6da3a9e1801bf6cf5510d"
     },
     {
       "caminho": "instrumentation.ts",
@@ -231,8 +231,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/3756ffc25d494e63bcdf15ecdd8054078350c1657bfe5f5fc8bb51f7e0d0b7ef",
-      "sha256": "3756ffc25d494e63bcdf15ecdd8054078350c1657bfe5f5fc8bb51f7e0d0b7ef"
+      "url": "arquivos/2a439f31fff90ebd09e164633a01b15f7200b4e1b74bbfd49e575894e2533708",
+      "sha256": "2a439f31fff90ebd09e164633a01b15f7200b4e1b74bbfd49e575894e2533708"
     },
     {
       "caminho": "lib/agent/project.ts",
@@ -251,8 +251,8 @@
     },
     {
       "caminho": "lib/agent/sinal.ts",
-      "url": "arquivos/1f9c02dc64edc2c8837d3e5b50cf9f1125d72dcbe33d6f7f00bb2d05a0daa73a",
-      "sha256": "1f9c02dc64edc2c8837d3e5b50cf9f1125d72dcbe33d6f7f00bb2d05a0daa73a"
+      "url": "arquivos/6ddc976464a982fc19d61df9366458ad9e54a7784577756e367dd5f209a34042",
+      "sha256": "6ddc976464a982fc19d61df9366458ad9e54a7784577756e367dd5f209a34042"
     },
     {
       "caminho": "lib/agent/tools.ts",
