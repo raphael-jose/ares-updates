@@ -1,11 +1,11 @@
 {
-  "versao": "20260810-212436",
+  "versao": "20260810-220417",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Consertamos o chat: antes, um amigo online podia aparecer como offline e as mensagens não chegavam. Agora o status é real (mostra quem está online de verdade) e, se a conexão cair, o Arthemis reconecta sozinho em segundo plano.",
-    "O aperto de mão entre as duas pontas foi destravado — mensagens, fotos e arquivos voltam a ser entregues com confirmação de recebimento.",
-    "Para aplicar: feche e abra o Arthemis novamente (ou pressione F5 no navegador). Ele baixa e instala sozinho, avisando em voz quando terminar."
+    "Nova: CHAMADA DE ÁUDIO E VÍDEO no chat P2P. No topo da conversa, os botões de telefone (áudio) e câmera (vídeo) ligam para o contato — o outro lado toca e aceita ou recusa. Chamada criptografada, direta entre as duas máquinas.",
+    "Durante a chamada: silenciar o microfone, desligar a câmera e o tempo de conversa aparecem na tela. Se o contato estiver em outra chamada ou recusar, o Arthemis avisa.",
+    "A chamada usa o mesmo canal seguro do chat (sinalização no canal E2E + áudio/vídeo WebRTC criptografado). Precisa do contato conectado para ligar."
   ],
   "arquivos": [
     {
@@ -110,8 +110,8 @@
     },
     {
       "caminho": "app/globals.css",
-      "url": "arquivos/af63ffa43d67654e375a643d0cc39902cada96f5536c2b93b44b76875751cc92",
-      "sha256": "af63ffa43d67654e375a643d0cc39902cada96f5536c2b93b44b76875751cc92"
+      "url": "arquivos/79077d99700f64e30d863c44c3db83df0be55d11f5833544b2f28edd6076cba2",
+      "sha256": "79077d99700f64e30d863c44c3db83df0be55d11f5833544b2f28edd6076cba2"
     },
     {
       "caminho": "app/icon.svg",
@@ -140,8 +140,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/5e989a4ae9ebf55da7b98303c658a9a603294122dd56b9bc8aa7a32fc89c7c93",
-      "sha256": "5e989a4ae9ebf55da7b98303c658a9a603294122dd56b9bc8aa7a32fc89c7c93"
+      "url": "arquivos/8e8e134825f627a5158b08ae4199b24440c5d768ce34e56e606ff22a12f38f5b",
+      "sha256": "8e8e134825f627a5158b08ae4199b24440c5d768ce34e56e606ff22a12f38f5b"
     },
     {
       "caminho": "instrumentation.ts",
@@ -230,8 +230,8 @@
     },
     {
       "caminho": "lib/agent/peer.ts",
-      "url": "arquivos/3a5fada09482ba9bfe973aeda49beaf58005719de5710f2113e0083d1d3ec21b",
-      "sha256": "3a5fada09482ba9bfe973aeda49beaf58005719de5710f2113e0083d1d3ec21b"
+      "url": "arquivos/bab261cc65e0756ac97a15088d3b53a67d46a3e7265c912072ce5794b559057b",
+      "sha256": "bab261cc65e0756ac97a15088d3b53a67d46a3e7265c912072ce5794b559057b"
     },
     {
       "caminho": "lib/agent/project.ts",
