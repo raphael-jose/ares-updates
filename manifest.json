@@ -1,11 +1,11 @@
 {
-  "versao": "20260810-211650",
+  "versao": "20260810-212436",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Corrigido o deadlock do chat P2P que impedia a conexão entre contatos online (25 convites trocados, nenhuma resposta): o dedupe de convites agora é liberado após o sucesso e por TTL, e respostas atrasadas de convites anteriores são aceitas mesmo sem pedido pendente.",
-    "Aperto de mão com timeout de segurança no ICE gathering — o convite/resposta não pendura mais quando servidores STUN/TURN demoram.",
-    "Para conexão entre casas em NAT restritivo, configure um TURN próprio no .env (TURN_URL, TURN_USERNAME, TURN_PASSWORD) — o relay público está fora do ar."
+    "Consertamos o chat: antes, um amigo online podia aparecer como offline e as mensagens não chegavam. Agora o status é real (mostra quem está online de verdade) e, se a conexão cair, o Arthemis reconecta sozinho em segundo plano.",
+    "O aperto de mão entre as duas pontas foi destravado — mensagens, fotos e arquivos voltam a ser entregues com confirmação de recebimento.",
+    "Para aplicar: feche e abra o Arthemis novamente (ou pressione F5 no navegador). Ele baixa e instala sozinho, avisando em voz quando terminar."
   ],
   "arquivos": [
     {
