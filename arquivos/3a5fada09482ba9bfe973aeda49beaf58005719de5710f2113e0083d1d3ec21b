@@ -1,0 +1,1061 @@
+/**
+ * Rede P2P do ARES — comunicação direta entre IAs com identidade verificada.
+ *
+ * Arquitetura (ver doc no README/COMANDOS):
+ *  - Sinalização: copiar/colar de CONVITE (blob com SDP + identidade). Não há
+ *    servidor central; a troca do convite é feita fora de banda (WhatsApp,
+ *    e-mail, mesmo PC, etc.).
+ *  - NAT traversal: WebRTC + STUN público (sem servidor de cadastro; STUN só
+ *    descobre o IP público — as mensagens NUNCA passam por ele).
+ *  - Identidade: cada instalação tem um par ECDSA (assinatura) + ECDH (acordo),
+ *    com fingerprint SHA-256 da chave pública ECDH. O nome amigável "Nome#XXXX"
+ *    é derivado do fingerprint — não é confiável sozinho.
+ *  - Handshake: challenge-response assinado. O par prova posse da chave privada
+ *    correspondente ao fingerprint anunciado. Se o contato já está no catálogo
+ *    com outro fingerprint → REJEITADO (falsificação detectada).
+ *  - Mensagens: cifradas com AES-GCM (chave de sessão ECDH+HKDF) e assinadas
+ *    ECDSA, com timestamp anti-replay (±5 min) e AAD = fingerprints dos dois
+ *    lados (proteção MITM/replay).
+ *  - Mídia grande: fragmentação em chunks (transparente para o chat).
+ */
+
+import {
+  assinarTexto,
+  chavesPublicas,
+  cifrarTexto,
+  decifrarTexto,
+  derivarSessao,
+  estadoIdentidade,
+  fingerprintDeJwk,
+  idAmigavelDeFingerprint,
+  verificarAssinatura,
+} from "./identity";
+
+export const INSTANCE_ID_KEY = "ares-id";
+export const PEER_NAME_KEY = "ares-peer-nome";
+
+/** Gera um UUID v4 (crypto.randomUUID com fallback). */
+export function gerarUuid(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* fallback abaixo */
+  }
+  const b = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(b);
+  } else {
+    for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  }
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** ID interno da instalação (UUID para localStorage do app). */
+export function getInstanceId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = window.localStorage.getItem(INSTANCE_ID_KEY);
+    if (!id) {
+      id = gerarUuid();
+      window.localStorage.setItem(INSTANCE_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return gerarUuid();
+  }
+}
+
+/** Nome amigável desta instância (ex.: "Arthemis do Raphael"). */
+export function getPeerName(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(PEER_NAME_KEY) ?? "";
+}
+
+export function setPeerName(nome: string): void {
+  try {
+    window.localStorage.setItem(PEER_NAME_KEY, nome.trim().slice(0, 40));
+  } catch {
+    /* sem storage */
+  }
+}
+
+// ——— Tipos ricos (mídia do chat) ———
+export type RichKind = "texto" | "imagem" | "video" | "audio" | "documento" | "sticker" | "emoji";
+
+export interface PeerRich {
+  kind: RichKind;
+  texto?: string;
+  url?: string;
+  mime?: string;
+  nome?: string;
+  duracao?: number;
+  thumb?: string;
+  truncado?: boolean;
+}
+
+export interface ChatMensagem {
+  id: string;
+  de: string; // fingerprint do remetente
+  nome?: string;
+  rico: PeerRich;
+  ts: number;
+  minha: boolean;
+  /** true = aguardando entrega (contato offline; fila local entrega quando ele voltar). */
+  pendente?: boolean;
+  /** true = o destinatário confirmou a recepção (ACK). */
+  entregue?: boolean;
+  /** true = o destinatário viu a mensagem com o chat aberto (ACK visto). */
+  visto?: boolean;
+}
+
+/** Identidade pública de um peer (o que o catálogo de contatos guarda). */
+export interface PeerIdentidadePublica {
+  fingerprint: string;
+  nome: string;
+  idPublico: string;
+  dhPub: JsonWebKey;
+  sigPub: JsonWebKey;
+}
+
+/**
+ * Envelope do canal. As mensagens de chat viajam em `enc` (AES-GCM) com `sig`
+ * (ECDSA) e `ts` (anti-replay). O handshake (`oi`, `challenge`,
+ * `challenge-resp`, `pronto`) é claro e assinado — é a fase de autenticação.
+ */
+export interface PeerMensagem {
+  v: 2;
+  tipo: "oi" | "challenge" | "challenge-resp" | "pronto" | "rich" | "chunk" | "ack" | "tchau";
+  de: string; // fingerprint de quem envia
+  nome?: string;
+  ts: number;
+  // Handshake:
+  dhPub?: JsonWebKey;
+  sigPub?: JsonWebKey;
+  nonce?: string;
+  sig?: string;
+  /** connId do par — desempate na reconexão (quem recria o canal). */
+  connId?: string;
+  // Confirmação de recepção (ack viaja em claro, como o handshake):
+  ackId?: string; // id da mensagem confirmada
+  visto?: boolean; // true = destinatário viu (chat aberto)
+  // Criptografado (rich/chunk):
+  enc?: { iv: string; ct: string };
+  rich?: PeerRich; // preenchido APÓS decifrar (uso interno)
+  chunkId?: string;
+  chunkI?: number;
+  chunkN?: number;
+  chunk?: string;
+}
+
+export interface PeerCallbacks {
+  /** Identidade do par VERIFICADA e canal pronto. */
+  onOpen?(peer: PeerIdentidadePublica): void;
+  /** Mensagem de chat (rica) recebida, decifrada e autenticada. */
+  onMensagem?(msg: { de: string; nome?: string; rich: PeerRich; ts: number; id?: string }): void;
+  /** ACK de recepção/visto de uma mensagem que ENVIAMOS. */
+  onAck?(msg: { de: string; ackId: string; ts: number; visto?: boolean }): void;
+  /** Canal fechado/erro. */
+  onClose?(motivo?: string): void;
+  /** Mudou o estado da conexão (para o HUD). */
+  onState?(estado: string): void;
+  /** Falha de identidade (fingerprint não bate com o contato salvo). */
+  onIdentidadeInvalida?(detalhe: string): void;
+}
+
+// Config ICE: STUN público sempre; TURN (relay) vem do .env via /api/turn,
+// buscado uma vez por sessão e cacheado. Sem TURN a conexão funciona em rede
+// local e NATs "cone"; com TURN passa a funcionar em qualquer rede (incluindo
+// NAT simétrico/CGNAT entre casas diferentes).
+const STUN_PADRAO: RTCIceServer[] = [
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+];
+
+let iceCache: RTCConfiguration | null = null;
+let icePromise: Promise<RTCConfiguration> | null = null;
+let turnAtivoEstado = false;
+let turnConsulta: Promise<boolean> | null = null;
+
+/** Busca a config ICE (STUN+TURN) uma vez e cacheia para a sessão. */
+async function obterIceServers(): Promise<RTCConfiguration> {
+  if (iceCache) return iceCache;
+  if (icePromise) return icePromise;
+  icePromise = (async () => {
+    const base: RTCConfiguration = { iceServers: [...STUN_PADRAO] };
+    try {
+      const res = await fetch("/api/turn");
+      const data = (await res.json()) as { iceServers?: RTCIceServer[]; turnAtivo?: boolean };
+      if (data.iceServers?.length) {
+        base.iceServers = data.iceServers;
+        turnAtivoEstado = Boolean(data.turnAtivo);
+        if (data.turnAtivo) console.info("[p2p] TURN ativo — conexão entre redes diferentes garantida.");
+      }
+    } catch {
+      /* sem /api/turn — segue só com STUN */
+    }
+    iceCache = base;
+    return base;
+  })();
+  return icePromise;
+}
+
+/**
+ * Espera o ICE gathering completar com TIMEOUT de segurança.
+ *
+ * Sem isso, se os servidores STUN/TURN demorarem (ou uma rede bloquear o
+ * UDP), o `await` pendura para sempre e o convite/resposta nunca é enviado
+ * — o outro lado re-convida em loop e o aperto de mão nunca completa.
+ * Após o timeout, segue com os candidatos já coletados (host/srflx bastam
+ * em muitas redes; o TURN continua como opção no próximo ciclo).
+ */
+async function aguardarGathering(pc: RTCPeerConnection): Promise<void> {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise<void>((resolve) => {
+    const fim = window.setTimeout(resolve, 5000);
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === "complete") {
+        window.clearTimeout(fim);
+        resolve();
+      }
+    };
+  });
+}
+
+/**
+ * Consulta (uma vez por sessão) se o TURN está configurado no servidor.
+ * A UI usa para avisar quando o relay está ausente — nessas instalações a
+ * conexão entre redes restritivas (NAT simétrico/CGNAT) pode não abrir.
+ */
+export function consultarTurnAtivo(): Promise<boolean> {
+  if (turnConsulta) return turnConsulta;
+  turnConsulta = (async () => {
+    try {
+      await obterIceServers();
+    } catch {
+      /* já tratado dentro */
+    }
+    return turnAtivoEstado;
+  })();
+  return turnConsulta;
+}
+
+// Tamanho do PAYLOAD de cada chunk (antes da cifragem). O envelope enviado
+// fica ~1,8× maior (base64 + AES-GCM + assinatura) e precisa caber no limite
+// de mensagem do RTCDataChannel (64 KiB nos navegadores mais antigos, até
+// 256 KiB nos modernos). 24 KiB de payload → envelope ≈ 44 KiB: cabe até no
+// limite antigo com folga.
+const CHUNK_TAM = 24 * 1024;
+const REPLAY_JANELA_MS = 5 * 60 * 1000;
+
+function b64(bytes: ArrayBuffer | Uint8Array): string {
+  const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "";
+  for (const b of u) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function unb64(s: string): Uint8Array {
+  const bin = atob(s);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+
+function codificar(obj: unknown): string {
+  return b64(te().encode(JSON.stringify(obj)));
+}
+function decodificar<T>(b64s: string): T {
+  return JSON.parse(td().decode(unb64(b64s.trim())));
+}
+const te = () => new TextEncoder();
+const td = () => new TextDecoder();
+
+export class PeerManager {
+  private pc: RTCPeerConnection | null = null;
+  private canal: RTCDataChannel | null = null;
+  private canais: RTCDataChannel[] = [];
+  private callbacks: PeerCallbacks;
+  /** Fingerprint do par (preenchido no handshake). */
+  private peerId: string | null = null;
+  private peerPublica: PeerIdentidadePublica | null = null;
+  /** Chave de sessão AES-GCM derivada via ECDH (E2E). */
+  private sessaoKey: CryptoKey | null = null;
+  /** Fingerprint esperado do par (do contato salvo) — força anti-falsificação. */
+  private esperadoFingerprint: string | null = null;
+  /** connId do par (do handshake) — usado como desempate na reconexão. */
+  private peerConnId = "";
+  private chunks = new Map<string, { n: number; partes: string[]; base: PeerMensagem }>();
+  private ultimosTss = new Set<number>();
+  // ——— Reconexão automática ———
+  private reconexaoTimer: number | null = null;
+  /** Vigia do canal recriado: sem renegociação ele não abre sozinho. */
+  private reconexaoWatchdog: number | null = null;
+  private tentativasReconexao = 0;
+  private reconectando = false;
+  private fechamentoManual = false;
+  // ——— Diagnóstico ICE (painel do dev) ———
+  private candidatos: ("host" | "srflx" | "relay")[] = [];
+  private turnUsado = false;
+  readonly connId: string = gerarUuid();
+
+  constructor(callbacks: PeerCallbacks, esperadoFingerprint?: string) {
+    this.callbacks = callbacks;
+    this.esperadoFingerprint = esperadoFingerprint ?? null;
+  }
+
+  get conectado(): boolean {
+    return this.canal?.readyState === "open" && this.sessaoKey !== null;
+  }
+
+  /** Estado do ICE (diagnóstico). */
+  get estadoPc(): string {
+    return this.pc?.connectionState ?? "sem-pc";
+  }
+
+  /**
+   * Diagnóstico completo da conexão (painel do dev): estados do ICE/canal,
+   * candidatos coletados por tipo (host/srflx/relay) e se o TURN foi usado.
+   * null = sem RTCPeerConnection ainda.
+   */
+  get diagnostico(): {
+    ice: string;
+    canal: string;
+    gathering: string;
+    candidatos: { host: number; srflx: number; relay: number; total: number };
+    turnUsado: boolean;
+  } | null {
+    if (!this.pc) return null;
+    const cand = { host: 0, srflx: 0, relay: 0, total: this.candidatos.length };
+    for (const t of this.candidatos) {
+      if (t === "host") cand.host++;
+      else if (t === "srflx") cand.srflx++;
+      else cand.relay++;
+    }
+    return {
+      ice: this.pc.iceConnectionState,
+      canal: this.canal?.readyState ?? "sem-canal",
+      gathering: this.pc.iceGatheringState,
+      candidatos: cand,
+      turnUsado: this.turnUsado,
+    };
+  }
+
+  /** Identidade pública VERIFICADA do par (null antes do handshake). */
+  get peerIdentidade(): PeerIdentidadePublica | null {
+    return this.peerPublica;
+  }
+
+  // ——— Canal / handshake ———
+
+  private novoCanal(): RTCDataChannel {
+    const canal = this.pc!.createDataChannel("ares-p2p", { ordered: true });
+    this.canais.push(canal);
+    this.ligarCanal(canal);
+    return canal;
+  }
+
+  private ligarCanal(canal: RTCDataChannel): void {
+    canal.onopen = () => {
+      // Se já existe um canal aberto (ex.: reconexão simultânea dos dois
+      // lados), mantém o primeiro e fecha o novo — evita handshake duplicado.
+      if (this.canal && this.canal !== canal && this.canal.readyState === "open") {
+        try {
+          canal.close();
+        } catch {
+          /* já fechado */
+        }
+        return;
+      }
+      this.canal = canal;
+      this.cancelarReconexao();
+      void this.iniciarHandshake();
+    };
+    canal.onmessage = (ev) => {
+      try {
+        void this.processar(String(ev.data));
+      } catch {
+        /* mensagem inválida */
+      }
+    };
+    canal.onclose = () => {
+      console.info("[p2p] canal fechado", this.connId.slice(0, 4));
+      if (this.canal === canal) {
+        this.canal = null;
+        this.sessaoKey = null;
+      }
+      // Se outro canal já abriu (ex.: o par recriou primeiro), não agenda
+      // reconexão — evita a corrida de dois canais novos simultâneos.
+      if (this.canal?.readyState === "open") return;
+      // Queda do canal não é necessariamente queda da conexão ICE: tenta
+      // reabrir automaticamente (com backoff) enquanto o ICE estiver vivo.
+      this.agendarReconexao();
+    };
+    canal.onerror = () => {
+      if (this.canal === canal) {
+        this.canal = null;
+        this.sessaoKey = null;
+      }
+      if (this.canal?.readyState === "open") return;
+      this.agendarReconexao();
+    };
+  }
+
+  // ——— Reconexão automática ———
+
+  /** Monitora o estado ICE: reconecta sozinho em quedas curtas. */
+  private ligarPc(pc: RTCPeerConnection): void {
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === "disconnected") {
+        // Pausa da rede (ex.: Wi-Fi piscou, PC dormiu pouco): o WebRTC tenta
+        // voltar sozinho. Avisa e não derruba a conexão.
+        this.callbacks.onState?.("reconectando");
+      } else if (s === "connected") {
+        // ICE voltou: só reporta "conectado" quando o CANAL também está pronto.
+        // ICE vivo com canal fechado = "reconectando" — evita o status
+        // "online" mentiroso (o usuário via contato online, mas o envio
+        // falhava). Se o canal morreu no meio, reabre agora (sem esperar
+        // o backoff).
+        if (this.canal?.readyState === "open" && this.sessaoKey !== null) {
+          this.callbacks.onState?.("conectado");
+        } else {
+          this.callbacks.onState?.("reconectando");
+          this.reconectarAgora();
+        }
+      } else if (s === "failed" || s === "closed") {
+        this.cancelarReconexao();
+        this.callbacks.onClose?.("conexão encerrada");
+      }
+    };
+  }
+
+  private cancelarReconexao(): void {
+    if (this.reconexaoTimer !== null) {
+      window.clearTimeout(this.reconexaoTimer);
+      this.reconexaoTimer = null;
+    }
+    if (this.reconexaoWatchdog !== null) {
+      window.clearTimeout(this.reconexaoWatchdog);
+      this.reconexaoWatchdog = null;
+    }
+    this.reconectando = false;
+    this.tentativasReconexao = 0;
+  }
+
+  /** Agenda uma nova tentativa de reabrir o canal (backoff 1s→8s, máx 5). */
+  private agendarReconexao(): void {
+    console.info("[p2p] agendarReconexao", { manual: this.fechamentoManual, reconectando: this.reconectando, pc: this.pc?.connectionState });
+    if (this.fechamentoManual || this.reconectando) return;
+    const estadoPc = this.pc?.connectionState;
+    if (estadoPc === "failed" || estadoPc === "closed") {
+      this.callbacks.onClose?.("conexão encerrada");
+      return;
+    }
+    if (this.tentativasReconexao >= 5) {
+      this.callbacks.onClose?.("não foi possível reconectar após várias tentativas");
+      return;
+    }
+    this.reconectando = true;
+    this.tentativasReconexao += 1;
+    const atraso = Math.min(8000, 1000 * 2 ** (this.tentativasReconexao - 1));
+    this.callbacks.onState?.("reconectando");
+    this.reconexaoTimer = window.setTimeout(() => {
+      this.reconexaoTimer = null;
+      this.reconectando = false;
+      this.reconectarAgora();
+    }, atraso);
+  }
+
+  /**
+   * Reabre um NOVO datachannel na mesma conexão ICE + re-handshake.
+   *
+   * O SCTP multiplexa vários datachannels na mesma associação, então criar um
+   * canal novo numa conexão viva abre sem renegociação. Para evitar a corrida
+   * de os DOIS lados criarem (cada um mantém o seu e fecha o do outro), só o
+   * lado com connId menor cria; o outro espera o `ondatachannel`. Se nada
+   * chegar dentro do vigia, o lado que espera cria mesmo assim (fallback).
+   * Esgotadas as tentativas, encerra com mensagem clara (recuperar = re-convidar).
+   */
+  private reconectarAgora(forcar = false): void {
+    if (this.fechamentoManual) return;
+    const est = this.pc?.connectionState;
+    if (!this.pc || est === "failed" || est === "closed") {
+      this.callbacks.onClose?.("conexão encerrada");
+      return;
+    }
+    this.canal = null;
+    this.sessaoKey = null;
+    // Desempate determinístico: quem tem connId menor recria o canal. Ambos os
+    // lados calculam o mesmo vencedor (o connId do par veio no handshake).
+    const devoCriar = forcar || !this.peerConnId || this.connId < this.peerConnId;
+    if (!devoCriar) {
+      // Espera passiva: o par recria e eu aceito via ondatachannel.
+      if (this.reconexaoWatchdog !== null) window.clearTimeout(this.reconexaoWatchdog);
+      this.reconexaoWatchdog = window.setTimeout(() => {
+        this.reconexaoWatchdog = null;
+        if (!this.canal || this.canal.readyState !== "open") {
+          this.reconectarAgora(true);
+        }
+      }, 3000);
+      return;
+    }
+    let canalNovo: RTCDataChannel | null = null;
+    try {
+      canalNovo = this.novoCanal();
+    } catch {
+      this.agendarReconexao();
+      return;
+    }
+    if (this.reconexaoWatchdog !== null) window.clearTimeout(this.reconexaoWatchdog);
+    this.reconexaoWatchdog = window.setTimeout(() => {
+      this.reconexaoWatchdog = null;
+      if (canalNovo && canalNovo.readyState !== "open") {
+        try {
+          canalNovo.close();
+        } catch {
+          /* já fechado */
+        }
+        this.agendarReconexao();
+      }
+    }, 3000);
+  }
+
+  private async iniciarHandshake(): Promise<void> {
+    const id = estadoIdentidade();
+    const pubs = chavesPublicas();
+    if (!id.criada || !id.desbloqueada || !pubs) {
+      this.callbacks.onState?.("identidade bloqueada");
+      this.callbacks.onClose?.("desbloqueie a identidade para conversar");
+      return;
+    }
+    this.callbacks.onState?.("verificando identidade");
+    this.enviarClaro({
+      tipo: "oi",
+      de: id.fingerprint,
+      nome: id.idPublico,
+      dhPub: pubs.dhPub,
+      sigPub: pubs.sigPub,
+      connId: this.connId,
+      ts: Date.now(),
+    });
+  }
+
+  private async processar(raw: string): Promise<void> {
+    const msg = JSON.parse(raw) as PeerMensagem;
+    const id = estadoIdentidade();
+
+    if (msg.tipo === "oi") {
+      // Recebeu a apresentação do par: valida o fingerprint anunciado
+      if (!msg.dhPub || !msg.sigPub) return;
+      const fp = await fingerprintDeJwk(msg.dhPub);
+      if (fp !== msg.de) {
+        this.callbacks.onIdentidadeInvalida?.("O peer anunciou um fingerprint que não bate com a chave.");
+        this.fechar();
+        return;
+      }
+      // Anti-falsificação: se esperamos um fingerprint específico (contato salvo) e veio outro…
+      if (this.esperadoFingerprint && this.esperadoFingerprint !== fp) {
+        this.callbacks.onIdentidadeInvalida?.(
+          `O peer se apresenta como ${msg.nome ?? fp.slice(0, 8)} mas não é a identidade salva no contato (falsificação detectada).`,
+        );
+        this.fechar();
+        return;
+      }
+      this.peerId = fp;
+      this.peerConnId = msg.connId ?? "";
+      // O idPublico anunciado é usado VERBATIM (preserva sufixo customizado,
+      // ex.: Raphael#966). Sem nome anunciado, deriva do fingerprint.
+      this.peerPublica = {
+        fingerprint: fp,
+        nome: msg.nome ?? "",
+        idPublico: msg.nome || idAmigavelDeFingerprint("", fp),
+        dhPub: msg.dhPub,
+        sigPub: msg.sigPub,
+      };
+      // Desafio: nonce aleatório para o par assinar (prova de posse da chave)
+      const nonce = gerarUuid() + gerarUuid();
+      this.noncePendente = nonce;
+      this.callbacks.onState?.("desafiando identidade");
+      this.enviarClaro({
+        tipo: "challenge",
+        de: id.fingerprint,
+        nome: id.idPublico,
+        nonce,
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    if (msg.tipo === "challenge") {
+      // Recebeu o desafio: assina e devolve (prova posse da privada)
+      if (!msg.nonce || !this.peerPublica) return;
+      const payload = `ares-desafio|${msg.nonce}|${this.peerPublica.fingerprint}|${id.fingerprint}`;
+      let sig = "";
+      try {
+        sig = await assinarTexto(payload);
+      } catch {
+        return;
+      }
+      this.enviarClaro({
+        tipo: "challenge-resp",
+        de: id.fingerprint,
+        nome: id.idPublico,
+        nonce: msg.nonce,
+        sig,
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    if (msg.tipo === "challenge-resp") {
+      // Verifica a assinatura do par sobre o nosso desafio
+      if (!msg.nonce || !this.peerPublica || msg.nonce !== this.noncePendente) return;
+      const payload = `ares-desafio|${msg.nonce}|${id.fingerprint}|${this.peerPublica.fingerprint}`;
+      const ok = await verificarAssinatura(this.peerPublica.sigPub, payload, msg.sig ?? "");
+      if (!ok) {
+        this.callbacks.onIdentidadeInvalida?.("Assinatura de identidade inválida.");
+        this.fechar();
+        return;
+      }
+      // Deriva a chave de sessão E2E (ECDH + HKDF)
+      try {
+        this.sessaoKey = await derivarSessao(this.peerPublica.dhPub);
+      } catch {
+        this.callbacks.onIdentidadeInvalida?.("Falha ao derivar a chave de sessão.");
+        this.fechar();
+        return;
+      }
+      this.liberarFilaPreSessao();
+      this.enviarClaro({ tipo: "pronto", de: id.fingerprint, nome: id.idPublico, ts: Date.now() });
+      this.callbacks.onState?.("conectado");
+      this.callbacks.onOpen?.(this.peerPublica);
+      return;
+    }
+
+    if (msg.tipo === "pronto") {
+      // O par confirmou: deriva a sessão do nosso lado
+      if (!this.peerPublica) return;
+      try {
+        this.sessaoKey = await derivarSessao(this.peerPublica.dhPub);
+      } catch {
+        return;
+      }
+      this.liberarFilaPreSessao();
+      this.callbacks.onState?.("conectado");
+      this.callbacks.onOpen?.(this.peerPublica);
+      return;
+    }
+
+    // Confirmação de recepção (ack) — recibo em claro, sem conteúdo.
+    if (msg.tipo === "ack") {
+      this.callbacks.onAck?.({
+        de: msg.de,
+        ackId: msg.ackId ?? "",
+        ts: msg.ts,
+        visto: msg.visto,
+      });
+      return;
+    }
+
+    // Mensagens cifradas (rich/chunk)
+    if ((msg.tipo === "rich" || msg.tipo === "chunk") && msg.enc) {
+      if (!this.sessaoKey) {
+        // Ainda no handshake (a sessão E2E não derivou): guarda em vez de
+        // descartar — há uma janela pequena logo após o canal abrir em que o
+        // remetente já tem a chave e o destinatário ainda não.
+        this.filaPreSessao.push(msg);
+        if (this.filaPreSessao.length > 64) this.filaPreSessao.shift();
+        return;
+      }
+      if (msg.tipo === "chunk") {
+        // Chunk: o payload cifrado carrega chunkId/chunkI/chunkN/chunk — é
+        // preciso decifrar ANTES de montar o buffer. NÃO passa por replayOk
+        // aqui: todos os chunks da mesma mensagem compartilham o MESMO ts (o
+        // anti-replay só vale para o envelope remontado, em decifrarEnvelope).
+        void this.processarChunkCifrado(msg, msg.de, msg.nome);
+      } else {
+        void this.decifrarEnvelope(msg, msg.de, msg.nome);
+      }
+      return;
+    }
+  }
+
+  /**
+   * Decifra/autentica um chunk individual e entrega os campos de montagem
+   * (chunkId/chunkI/chunkN/chunk) ao buffer. Sem anti-replay: todos os chunks
+   * de uma mensagem usam o mesmo ts.
+   */
+  private async processarChunkCifrado(envelope: PeerMensagem, de: string, nome?: string): Promise<void> {
+    if (!this.sessaoKey || !envelope.enc) return;
+    const aad = `${de}|${estadoIdentidade().fingerprint || ""}`;
+    let claro: string;
+    try {
+      claro = await decifrarTexto(this.sessaoKey, envelope.enc.iv, envelope.enc.ct, aad);
+    } catch {
+      return; // integridade/AAD falhou — descarta
+    }
+    const okAssinatura = await verificarAssinatura(
+      this.peerPublica?.sigPub ?? ({} as JsonWebKey),
+      claro,
+      envelope.sig ?? "",
+    );
+    if (!okAssinatura) return;
+    let interna: { chunkId?: string; chunkI?: number; chunkN?: number; chunk?: string };
+    try {
+      interna = JSON.parse(claro) as { chunkId?: string; chunkI?: number; chunkN?: number; chunk?: string };
+    } catch {
+      return; // payload corrompido
+    }
+    this.processarChunk({ ...envelope, ...interna }, de, nome);
+  }
+
+  /**
+   * Decifra e autentica um envelope rico (mensagem inteira ou remontada de
+   * chunks) e entrega via onMensagem — incluindo o `id` original (a chave
+   * dos ACKs de recepção/visto).
+   */
+  private async decifrarEnvelope(envelope: PeerMensagem, de: string, nome?: string): Promise<void> {
+    if (!this.sessaoKey || !envelope.enc) return;
+    if (!this.replayOk(envelope.ts)) return;
+    // AAD simétrico: fp do REMETENTE (de) + fp do DESTINATÁRIO (a NOSSA).
+    // O envio usa `${minhaFp}|${peerFp}`; aqui de é a fp do remetente e
+    // estadoIdentidade().fingerprint é a nossa — os dois lados computam a
+    // MESMA string e o AES-GCM autentica. (Usar `this.peerId` aqui dava
+    // `fpRemetente|fpRemetente` — não batia com o envio e Toda mensagem era
+    // descartada em silêncio.)
+    const aad = `${de}|${estadoIdentidade().fingerprint || ""}`;
+    let claro: string;
+    try {
+      claro = await decifrarTexto(this.sessaoKey, envelope.enc.iv, envelope.enc.ct, aad);
+    } catch {
+      return; // integridade/AAD falhou — descarta
+    }
+    // Verifica a assinatura do conteúdo
+    const okAssinatura = await verificarAssinatura(
+      this.peerPublica?.sigPub ?? ({} as JsonWebKey),
+      claro,
+      envelope.sig ?? "",
+    );
+    if (!okAssinatura) return;
+    let interna: { rico?: PeerRich; id?: string };
+    try {
+      interna = JSON.parse(claro) as { rico?: PeerRich; id?: string };
+    } catch {
+      return; // payload corrompido
+    }
+    if (interna.rico) {
+      this.callbacks.onMensagem?.({ de, nome, rich: interna.rico, ts: envelope.ts, id: interna.id });
+    }
+  }
+
+  private noncePendente: string | null = null;
+
+  /** Mensagens que chegaram antes da sessão E2E derivar (reprocessadas depois). */
+  private filaPreSessao: PeerMensagem[] = [];
+
+  /** Re-processa as mensagens guardadas assim que a sessão E2E estiver pronta. */
+  private liberarFilaPreSessao(): void {
+    const fila = this.filaPreSessao.splice(0);
+    for (const m of fila) void this.processar(JSON.stringify(m));
+  }
+
+  private replayOk(ts: number): boolean {
+    const agora = Date.now();
+    if (Math.abs(agora - ts) > REPLAY_JANELA_MS) return false;
+    if (this.ultimosTss.has(ts)) return false;
+    this.ultimosTss.add(ts);
+    if (this.ultimosTss.size > 256) {
+      const primeiro = this.ultimosTss.values().next().value as number;
+      this.ultimosTss.delete(primeiro);
+    }
+    return true;
+  }
+
+  private processarChunk(
+    parcial: { chunkId?: string; chunkI?: number; chunkN?: number; chunk?: string },
+    de: string,
+    nome?: string,
+  ): void {
+    const chave = parcial.chunkId ?? "";
+    const buf = this.chunks.get(chave);
+    if (buf && parcial.chunkI !== undefined && parcial.chunkN !== undefined) {
+      buf.partes[parcial.chunkI] = parcial.chunk ?? "";
+      if (buf.partes.every((p) => p !== undefined)) {
+        this.chunks.delete(chave);
+        try {
+          // O chunk remonta o ENVELOPE original (o mesmo JSON do rich), que
+          // ainda está cifrado — decifra/autentica como uma mensagem inteira.
+          const remontada = JSON.parse(td().decode(unb64(buf.partes.join("")))) as PeerMensagem;
+          void this.decifrarEnvelope(remontada, de, nome);
+        } catch {
+          /* payload corrompido */
+        }
+      }
+    } else if (parcial.chunkI === 0 && parcial.chunkN !== undefined && parcial.chunkId) {
+      const partes: string[] = new Array(parcial.chunkN).fill(undefined);
+      partes[0] = parcial.chunk ?? "";
+      this.chunks.set(chave, {
+        n: parcial.chunkN,
+        partes,
+        base: { v: 2, tipo: "chunk", ...parcial, de, nome, ts: Date.now() },
+      });
+    }
+  }
+
+  private enviarClaro(msg: Omit<PeerMensagem, "v">): void {
+    if (this.canal?.readyState === "open") {
+      this.canal.send(JSON.stringify({ v: 2, ...msg }));
+    }
+  }
+
+  // ——— Convite (sinalização fora de banda) ———
+
+  /** Gera um CONVITE (blob) para enviar fora de banda ao dono do peer. */
+  async gerarConvite(): Promise<string> {
+    this.reset();
+    const id = estadoIdentidade();
+    const pubs = chavesPublicas();
+    if (!id.criada || !id.desbloqueada || !pubs) {
+      throw new Error("Desbloqueie a identidade primeiro.");
+    }
+    const ice = await obterIceServers();
+    const pc = new RTCPeerConnection(ice);
+    this.pc = pc;
+    this.ligarPc(pc);
+    this.rastrearCandidatos(pc);
+    // Também aceita canais do par (reconexão: se o par recriar o canal,
+    // o ofertante recebe via ondatachannel).
+    pc.ondatachannel = (ev) => {
+      this.canais.push(ev.channel);
+      this.ligarCanal(ev.channel);
+    };
+    this.novoCanal();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await aguardarGathering(pc);
+    return codificar({
+      tipo: "convite",
+      id: id.fingerprint,
+      nome: id.idPublico,
+      dhPub: pubs.dhPub,
+      sigPub: pubs.sigPub,
+      sdp: pc.localDescription,
+      // connId trocado PELA SINALIZAÇÃO (antes do canal existir): os dois
+      // lados sabem quem tem o connId menor ANTES de qualquer canal abrir,
+      // então só um lado cria na reconexão — elimina a corrida de canais
+      // paralelos (ambos criando e fechando o do outro em loop).
+      connId: this.connId,
+    });
+  }
+
+  /** Conta os candidatos ICE por tipo (host/srflx/relay) para o diagnóstico. */
+  private rastrearCandidatos(pc: RTCPeerConnection): void {
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      const sdp = ev.candidate.candidate; // ex.: "candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host"
+      const tipo = sdp.includes("typ relay") ? "relay" : sdp.includes("typ srflx") ? "srflx" : "host";
+      this.candidatos.push(tipo);
+      if (tipo === "relay") this.turnUsado = true;
+    };
+  }
+
+  /** Aceita um CONVITE e devolve a RESPOSTA (blob para devolver ao dono). */
+  async responderConvite(conviteB64: string): Promise<string> {
+    this.reset();
+    const id = estadoIdentidade();
+    const pubs = chavesPublicas();
+    if (!id.criada || !id.desbloqueada || !pubs) {
+      throw new Error("Desbloqueie a identidade primeiro.");
+    }
+    const convite = decodificar<{ id: string; nome: string; dhPub: JsonWebKey; sigPub: JsonWebKey; sdp: RTCSessionDescriptionInit; connId?: string }>(conviteB64);
+    // Valida o fingerprint anunciado no convite ANTES de aceitar
+    const fp = await fingerprintDeJwk(convite.dhPub);
+    if (fp !== convite.id) throw new Error("Convite inválido: fingerprint não confere.");
+    // Se já esperamos um fingerprint (contato salvo), ele prevalece — o convite
+    // de uma identidade DIFERENTE é rejeitado no handshake (anti-falsificação).
+    if (!this.esperadoFingerprint) this.esperadoFingerprint = fp;
+    // connId do par vindo pela sinalização: decide quem cria o canal na
+    // reconexão (o de connId menor) sem depender do handshake completar.
+    this.peerConnId = convite.connId ?? "";
+    const ice = await obterIceServers();
+    const pc = new RTCPeerConnection(ice);
+    this.pc = pc;
+    this.ligarPc(pc);
+    this.rastrearCandidatos(pc);
+    pc.ondatachannel = (ev) => {
+      this.canais.push(ev.channel);
+      this.ligarCanal(ev.channel);
+    };
+    await pc.setRemoteDescription(new RTCSessionDescription(convite.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await aguardarGathering(pc);
+    return codificar({
+      tipo: "convite-resp",
+      id: id.fingerprint,
+      nome: id.idPublico,
+      dhPub: pubs.dhPub,
+      sigPub: pubs.sigPub,
+      sdp: pc.localDescription,
+      connId: this.connId,
+    });
+  }
+
+  /** Completa a conexão com a RESPOSTA do par. */
+  async completarConvite(respostaB64: string): Promise<void> {
+    if (!this.pc) throw new Error("Gere um convite antes de colar a resposta.");
+    // Idempotente: o broker público pode reentregar a MESMA resposta (QoS 0).
+    // Se a conexão já passou da oferta, a resposta já foi aplicada — ignora.
+    if (this.pc.signalingState === "stable" || this.pc.signalingState === "closed") return;
+    const resposta = decodificar<{ id: string; dhPub: JsonWebKey; sdp: RTCSessionDescriptionInit; connId?: string }>(respostaB64);
+    const fp = await fingerprintDeJwk(resposta.dhPub);
+    if (fp !== resposta.id) throw new Error("Resposta inválida: fingerprint não confere.");
+    if (!this.esperadoFingerprint) this.esperadoFingerprint = fp;
+    this.peerConnId = resposta.connId ?? "";
+    await this.pc.setRemoteDescription(new RTCSessionDescription(resposta.sdp));
+  }
+
+  // ——— Envio ———
+
+  /** Envia conteúdo rico cifrado (E2E) e assinado. `msgId` é o id local da
+   * mensagem — viaja DENTRO do payload cifrado para o destinatário poder
+   * confirmar a recepção (ACK) referenciando a MESMA mensagem. */
+  async enviarRich(rich: PeerRich, msgId?: string): Promise<boolean> {
+    const canal = await this.aguardarCanalPronto();
+    if (!canal || canal.readyState !== "open" || !this.sessaoKey) return false;
+    const id = estadoIdentidade();
+    const aad = `${id.fingerprint}|${this.peerId ?? ""}`;
+    const ts = Date.now();
+    const payload = JSON.stringify({ rico: rich, id: msgId });
+    const { iv, ct } = await cifrarTexto(this.sessaoKey, payload, aad);
+    const sig = await assinarTexto(payload);
+    const json = JSON.stringify({
+      v: 2,
+      tipo: "rich",
+      de: id.fingerprint,
+      nome: id.idPublico,
+      ts,
+      enc: { iv, ct },
+      sig,
+    });
+    if (json.length <= CHUNK_TAM) {
+      canal.send(json);
+      return true;
+    }
+    // Fragmenta (cada chunk cifrado individualmente)
+    const base64 = b64(te().encode(json));
+    const n = Math.ceil(base64.length / CHUNK_TAM);
+    const chunkId = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    for (let i = 0; i < n; i++) {
+      const pedaco = base64.slice(i * CHUNK_TAM, (i + 1) * CHUNK_TAM);
+      const payloadChunk = JSON.stringify({ chunkId, chunkI: i, chunkN: n, chunk: pedaco });
+      const e = await cifrarTexto(this.sessaoKey, payloadChunk, aad);
+      const s = await assinarTexto(payloadChunk);
+      canal.send(
+        JSON.stringify({
+          v: 2,
+          tipo: "chunk",
+          de: id.fingerprint,
+          nome: id.idPublico,
+          ts,
+          enc: e,
+          sig: s,
+        }),
+      );
+    }
+    return true;
+  }
+
+  /**
+   * Se o canal estiver fechado mas a conexão ICE viva, reabre o canal
+   * (reconexão automática) e espera ele ficar pronto (open + sessão E2E) por
+   * até `tempoMaxMs` — o envio sobrevive a quedas curtas em vez de falhar na
+   * hora. Se a conexão estiver realmente morta, resolve null (o chamador
+   * avisa).
+   */
+  private aguardarCanalPronto(tempoMaxMs = 6000): Promise<RTCDataChannel | null> {
+    if (this.canal?.readyState === "open" && this.sessaoKey !== null) {
+      return Promise.resolve(this.canal);
+    }
+    if (this.fechamentoManual) return Promise.resolve(null);
+    const est = this.pc?.connectionState;
+    if (!this.pc || est === "failed" || est === "closed") return Promise.resolve(null);
+    // Já há reconexão agendada (backoff)? Só espera — evita canal duplicado.
+    if (!this.reconectando && !this.canal) {
+      this.reconectarAgora();
+    }
+    return new Promise((resolve) => {
+      const fim = Date.now() + tempoMaxMs;
+      const checar = () => {
+        if (this.canal?.readyState === "open" && this.sessaoKey !== null) {
+          resolve(this.canal);
+          return;
+        }
+        if (Date.now() >= fim) {
+          resolve(null);
+          return;
+        }
+        setTimeout(checar, 150);
+      };
+      setTimeout(checar, 150);
+    });
+  }
+
+  /** Envia mensagem de texto (atalho). */
+  enviarMensagem(texto: string): boolean {
+    void this.enviarRich({ kind: "texto", texto });
+    return true;
+  }
+
+  /**
+   * Confirma a recepção (visto=false) ou a visualização (visto=true) de uma
+   * mensagem recebida. Viaja em claro como o handshake — é só um recibo;
+   * não carrega conteúdo.
+   */
+  enviarAck(ackId: string, visto = false): boolean {
+    if (!ackId || this.canal?.readyState !== "open") return false;
+    this.enviarClaro({ tipo: "ack", de: estadoIdentidade().fingerprint, ts: Date.now(), ackId, visto });
+    return true;
+  }
+
+
+  /**
+   * Encerra a conexão ATUAL sem marcar fechamento manual — usado ao gerar/
+   * aceitar convites, para que a reconexão automática continue habilitada
+   * depois do pareamento (fechar() marcaria fechamentoManual e a mataria).
+   */
+  private reset(): void {
+    this.cancelarReconexao();
+    for (const c of this.canais) {
+      try {
+        c.close();
+      } catch {
+        /* já fechado */
+      }
+    }
+    this.canais = [];
+    try {
+      this.pc?.close();
+    } catch {
+      /* já fechado */
+    }
+    this.pc = null;
+    this.canal = null;
+    this.sessaoKey = null;
+    this.peerId = null;
+    this.peerConnId = "";
+    this.peerPublica = null;
+    this.noncePendente = null;
+    this.chunks.clear();
+    this.ultimosTss.clear();
+  }
+
+  fechar(motivo?: string): void {
+    this.fechamentoManual = true;
+    this.reset();
+    this.callbacks.onClose?.(motivo);
+  }
+}
