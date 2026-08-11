@@ -1,11 +1,11 @@
 {
-  "versao": "20260810-220417",
+  "versao": "20260810-221412",
   "npm": false,
   "exigeReinicio": false,
   "notas": [
-    "Nova: CHAMADA DE ÁUDIO E VÍDEO no chat P2P. No topo da conversa, os botões de telefone (áudio) e câmera (vídeo) ligam para o contato — o outro lado toca e aceita ou recusa. Chamada criptografada, direta entre as duas máquinas.",
-    "Durante a chamada: silenciar o microfone, desligar a câmera e o tempo de conversa aparecem na tela. Se o contato estiver em outra chamada ou recusar, o Arthemis avisa.",
-    "A chamada usa o mesmo canal seguro do chat (sinalização no canal E2E + áudio/vídeo WebRTC criptografado). Precisa do contato conectado para ligar."
+    "Correção de entrega das atualizações: máquinas que travaram no meio de um download (desligaram durante a instalação) agora se recuperam sozinhas e voltam a receber as atualizações seguintes.",
+    "Correção de ativação: quando uma atualização chega sem precisar reiniciar, o app agora recarrega a página automaticamente — antes o usuário ficava na versão antiga até fechar e abrir de novo. Por isso a chamada de áudio/vídeo pode não ter aparecido ainda: é só aguardar a próxima atualização ou dar F5.",
+    "Se você ainda não viu os botões de chamada (telefone e câmera) no topo da conversa, um F5 resolve na hora — o código já está baixado."
   ],
   "arquivos": [
     {
@@ -140,8 +140,8 @@
     },
     {
       "caminho": "components/AresOrb.tsx",
-      "url": "arquivos/8e8e134825f627a5158b08ae4199b24440c5d768ce34e56e606ff22a12f38f5b",
-      "sha256": "8e8e134825f627a5158b08ae4199b24440c5d768ce34e56e606ff22a12f38f5b"
+      "url": "arquivos/5ae17254258d1f1e6b50b6bcfb44b88a7595fa22ce081173b048adc62ebd7787",
+      "sha256": "5ae17254258d1f1e6b50b6bcfb44b88a7595fa22ce081173b048adc62ebd7787"
     },
     {
       "caminho": "instrumentation.ts",
@@ -290,8 +290,8 @@
     },
     {
       "caminho": "lib/atualizador.ts",
-      "url": "arquivos/8089f2582d44a49fd018e97a02c9b841ea97c92584e6fa24be940aa5d492693b",
-      "sha256": "8089f2582d44a49fd018e97a02c9b841ea97c92584e6fa24be940aa5d492693b"
+      "url": "arquivos/a65fb3ccf0d94732e6b5b4e8427dd4e7c9160dc7f62e36b499f8e3512efa3fcc",
+      "sha256": "a65fb3ccf0d94732e6b5b4e8427dd4e7c9160dc7f62e36b499f8e3512efa3fcc"
     },
     {
       "caminho": "lib/bilingual.ts",
